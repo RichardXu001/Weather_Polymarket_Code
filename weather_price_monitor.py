@@ -165,25 +165,39 @@ class WeatherPriceMonitor:
         print(f"{BLUE}CSV: {self.csv_file}{RESET}")
         print(f"{BOLD}{CYAN}=" * 70 + RESET)
 
-    def run_once(self):
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        noaa_curr = self.fetch_noaa()
-        om_curr, om_fore = self.fetch_open_meteo()
-        mn_curr, mn_fore = self.fetch_met_no()
-        prices = self.fetch_polymarket_asks()
-        sources = {
-            "NOAA (METAR)": {"curr": noaa_curr, "fore": None},
-            "Open-Meteo": {"curr": om_curr, "fore": om_fore},
-            "Met.no": {"curr": mn_curr, "fore": mn_fore}
+    def get_weather_data(self):
+        """获取所有已激活数据源的数据并计算共识"""
+        # 定义所有可用的数据获取方法
+        source_fetchers = {
+            "NOAA (METAR)": lambda: (self.fetch_noaa(), None),
+            "Open-Meteo": self.fetch_open_meteo,
+            "Met.no": self.fetch_met_no
         }
+        
+        sources = {}
+        for name, fetcher in source_fetchers.items():
+            try:
+                curr, fore = fetcher()
+                sources[name] = {"curr": curr, "fore": fore}
+            except:
+                sources[name] = {"curr": None, "fore": None}
+                
         valid_curr = [v['curr'] for v in sources.values() if v['curr'] is not None]
         avg_curr = sum(valid_curr) / len(valid_curr) if valid_curr else None
+        
         valid_fore = [v['fore'] for v in sources.values() if v['fore'] is not None]
         avg_fore = sum(valid_fore) / len(valid_fore) if valid_fore else None
+        
         div = max(valid_curr) - min(valid_curr) if len(valid_curr) > 1 else 0
-        wd = {"sources": sources, "avg_curr": avg_curr, "avg_fore": avg_fore, "divergence": div}
+        return {"sources": sources, "avg_curr": avg_curr, "avg_fore": avg_fore, "divergence": div}
+
+    def run_once(self):
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        wd = self.get_weather_data()
+        prices = self.fetch_polymarket_asks()
+        
         self.display_dashboard(now, wd, prices)
-        if avg_curr is not None or prices:
+        if wd['avg_curr'] is not None or prices:
             self.log_to_csv(now, wd, prices)
 
     def start(self, interval=60):

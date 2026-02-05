@@ -1,6 +1,6 @@
-# 🛠️ SKILL: 快速切换监控地点与事件 (Location & Event Switching)
+# 🛠️ SKILL: 快速切换监控地点与数据源 (Location & Source Switching)
 
-本手册详细介绍了在 `Weather Polymarket Edge` 系统中切换监控地点的方法论、闭环流程及注意事项。
+本手册详细介绍了在 `Weather Polymarket Edge` 系统中切换监控地点以及管理多个气象数据源的方法论、闭环流程及注意事项。
 
 ## 1. 核心流程 (Core Workflow)
 
@@ -9,56 +9,48 @@
 2. **确认结算站点 (Crucial)**：
    - 展开事件页面的 "Market Context" 或 "Rules"。
    - 寻找 "Official reference station" 或 "Wunderground station URL"。
-   - 提取其 **ICAO 代码**（如伦敦市中心的 `EGLC`，伦敦西部的 `EGLL`）。
+   - 提取其 **ICAO 代码**（如伦敦的 `EGLC`）。
 
 ### 第二步：获取地理坐标
-1. **寻找 Lat/Lon**：在 Google 或气象站信息中搜索该代码的经纬度。
-   - 例如 `EGLC Lat Lon` -> `51.50, 0.05`。
-2. **目的**：Open-Meteo 和 Met.no 需要精确坐标来提供模型预测。
+1. **寻找 Lat/Lon**：在 Google 或气象站信息中搜索该代码的经纬度（如 `EGLC Lat Lon` -> `51.50, 0.05`）。
+2. **目的**：模型源（Open-Meteo, Met.no）需要坐标来提供本地化预测。
 
 ### 第三步：参数化启动
-利用重构后的 `weather_price_monitor.py` 支持的参数启动：
-
-**方式 A：使用内置预设 (推荐)**
 ```bash
 ./venv/bin/python3 weather_price_monitor.py --preset london
 ```
 
-**方式 B：手动指定参数**
-```bash
-./venv/bin/python3 weather_price_monitor.py --icao EGLC --slug [EVENT_SLUG] --lat 51.50 --lon 0.05
-```
+---
+
+## 2. 数据源管理 (Data Source Management)
+
+系统默认集成三个互补的数据源，以实现交叉验证：
+
+| 数据源 | 类型 | 优势 | 局限 |
+| :--- | :--- | :--- | :--- |
+| **NOAA (METAR)** | 官方实测 | **结算真值**，直接来自机场气象站 | 仅提供实时观测，无预报 |
+| **Open-Meteo** | 商业模型 | 响应速度快，带 1 小时逐小时预报 | 属于数值模拟，与实测有微小偏差 |
+| **Met.no** | 全球顶级模型 | 挪威气象局出品，寒冷天气预报极其精准 | 采样点可能与机场有公里级偏差 |
+
+### 如何切换/新增数据源？
+脚本采用了模块化设计，若需新增数据源（如 AccuWeather）：
+1. 在类中增加 `fetch_new_source` 方法。
+2. 在 `run_once` 的 `sources` 字典中添加相应条目。
+3. 系统会自动计算新增源的共识（Consensus）并计入分歧度（Divergence）检测。
 
 ---
 
-## 2. 闭环验证 (Closing the Loop)
+## 3. 闭环验证 (Closing the Loop)
 
-在切换地点后，必须完成以下验证流程才能进入交易阶段：
-
-1. **API 连接验证**：
-   - 观察控制台是否出现 "N/A"。
-   - 如果 NOAA (METAR) 是 N/A，说明 ICAO 代码可能错误。
-2. **报价匹配验证**：
-   - 检查仪表盘底部的选项（如 -3°C, -2°C）是否与网页端刷新保持一致。
-   - 若价格全是 N/A，说明 Slug 错误或该事件已关闭。
-3. **数据一致性检查**：
-   - 检查 `Divergence`（分歧度）。
-   - 若分歧度常年 > 5.0，可能意味着三个源中有一个定位到了错误的地点。
+在切换地点或调整源后，必须验证：
+1. **NOAA 一致性**：确认 `NO_ACTUAL` 是否正常返回。若 N/A，结算依据即丢失。
+2. **预报趋势一致性**：检查 `OM_FORECAST` 和 `MN_FORECAST` 的方向是否一致。
+3. **分歧度检查**：
+   - `Divergence < 0.8`：数据可信度高。
+   - `Divergence > 1.5`：可能存在某个源定位漂移，此时应调低交易杠杆。
 
 ---
 
-## 3. 注意事项 (Precautions)
-
-- **⚠️ 结算站点漂移**：伦敦有两个常用机场（Heathrow 和 City Airport）。Polymarket 的不同事件可能使用不同站点，务必以 Rules 为准。
-- **⚠️ 整数陷阱**：所有地点的结算均以 Wunderground 显示的**整数**为准。
-- **⚠️ 时区差异**：预报 API 返回的是 UTC 时间。脚本已自动处理，但在研判“最高温度产生时间”时，请注意该地点的夏令时/标准时偏差。
-
----
-
-## 4. 故障排除表
-
-| 现象 | 可能原因 | 解决方法 |
-| :--- | :--- | :--- |
-| NOAA 显示 N/A | ICAO 代码无效 | 查阅 aviationweather.gov 确认代码 |
-| 价格全是 N/A | Slug 错误或超时 | 检查 URL 段落，确认 API 访问权 |
-| 预报曲线平直 | 坐标点位于海洋 | 微调 Lat/Lon 靠近陆地气象站 |
+## 4. 注意事项 (Precautions)
+- **⚠️ 整数陷阱**：无论监测到多少位小数，Polymarket 结算最终只看 Wunderground 上的整数。
+- **⚠️ 站点唯一性**：某些大城市有多个机场，务必核对 Rules 中的 ICAO 代码。
