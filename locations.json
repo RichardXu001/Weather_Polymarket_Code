@@ -1,0 +1,20 @@
+{
+    "seoul": {
+        "icao": "RKSI",
+        "slug_template": "highest-temperature-in-seoul-on-{month}-{day}-{year}",
+        "lat": 37.46,
+        "lon": 126.44,
+        "tz_offset": 9,
+        "target_temp": -5.0,
+        "desc": "Seoul Incheon Airport"
+    },
+    "london": {
+        "icao": "EGLC",
+        "slug_template": "highest-temperature-in-london-on-{month}-{day}-{year}",
+        "lat": 51.50,
+        "lon": 0.05,
+        "tz_offset": 0,
+        "target_temp": 8.0,
+        "desc": "London City Airport"
+    }
+}

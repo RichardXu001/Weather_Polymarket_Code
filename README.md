@@ -2,19 +2,32 @@
 
 本系统用于实时监控首尔机场气温与 Polymarket 预测市场价格，通过多源数据校验（NOAA, Open-Meteo, Met.no）和 1 小时趋势预报辅助交易决策。
 
-## 1. 快速启动
-确保处于项目虚拟环境中，运行：
+## 1. 快速启动 (生产环境)
+核心入口为 `trading_hub.py`，支持多区域并行监控与自动交易：
 ```bash
-# 默认启动 (首尔 2月6日)
-./venv/bin/python3 weather_price_monitor.py
+# 1. 默认启动 (伦敦 + 首尔 并行)
+./venv/bin/python3 trading_hub.py
 
-# 伦敦快捷启动 (2月5日)
-./venv/bin/python3 weather_price_monitor.py --preset london
+# 2. 仅启动伦敦 (London)
+./venv/bin/python3 trading_hub.py --presets london
 
-# 手动指定任意地点
-./venv/bin/python3 weather_price_monitor.py --icao [ICAO代码] --slug [事件Slug] --lat [纬度] --lon [经度]
+# 3. 指定地点与高频采样 (15秒一次)
+./venv/bin/python3 trading_hub.py --presets london seoul --interval 15
 ```
-程序启动后会每分钟刷新一次可视化仪表盘。
+
+## 2. 命令行参数详解
+| 参数 | 说明 | 示例 |
+| :--- | :--- | :--- |
+| `--presets` | 运行地点预设，支持 `london`, `seoul` | `--presets london` |
+| `--interval` | 采样频率(秒)，默认 30s | `--interval 60` |
+
+---
+
+## 3. 辅助监控工具 (单项调试)
+如果只想快速查看某一地点的可视化仪表盘而不参与交易：
+```bash
+./venv/bin/python3 weather_price_monitor.py --preset london
+```
 
 ## 2. 核心功能说明
 

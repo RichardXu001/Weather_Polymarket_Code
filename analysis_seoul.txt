@@ -1,0 +1,20 @@
+Analysis for Seoul
+                 timestamp  consensus_actual  consensus_forecast  divergence  NO_ACTUAL  OM_ACTUAL  OM_FORECAST  MN_ACTUAL  MN_FORECAST  -2°C or higher  -3°C  -4°C  -5°C   -6°C   -7°C  -8°C or below
+count                    1               1.0                1.00         1.0        1.0        1.0          1.0        1.0          1.0           1.000  1.00  1.00  1.00  1.000  1.000          1.000
+mean   2026-02-05 14:01:35               5.6                5.65         3.0        5.0        4.4          3.5        7.4          7.8           0.197  0.42  0.47  0.18  0.028  0.009          0.005
+min    2026-02-05 14:01:35               5.6                5.65         3.0        5.0        4.4          3.5        7.4          7.8           0.197  0.42  0.47  0.18  0.028  0.009          0.005
+25%    2026-02-05 14:01:35               5.6                5.65         3.0        5.0        4.4          3.5        7.4          7.8           0.197  0.42  0.47  0.18  0.028  0.009          0.005
+50%    2026-02-05 14:01:35               5.6                5.65         3.0        5.0        4.4          3.5        7.4          7.8           0.197  0.42  0.47  0.18  0.028  0.009          0.005
+75%    2026-02-05 14:01:35               5.6                5.65         3.0        5.0        4.4          3.5        7.4          7.8           0.197  0.42  0.47  0.18  0.028  0.009          0.005
+max    2026-02-05 14:01:35               5.6                5.65         3.0        5.0        4.4          3.5        7.4          7.8           0.197  0.42  0.47  0.18  0.028  0.009          0.005
+std                    NaN               NaN                 NaN         NaN        NaN        NaN          NaN        NaN          NaN             NaN   NaN   NaN   NaN    NaN    NaN            NaN
+
+Correlation between Consensus Actual and Prices:
+consensus_actual   NaN
+-2°C or higher     NaN
+-3°C               NaN
+-4°C               NaN
+-5°C               NaN
+-6°C               NaN
+-7°C               NaN
+-8°C or below      NaN

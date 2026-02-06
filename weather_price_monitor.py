@@ -5,32 +5,25 @@ import json
 import csv
 import os
 import argparse
+import sys
 from datetime import datetime, timedelta
 
-# 预设配置
-PRESETS = {
-    "seoul": {
-        "icao": "RKSI",
-        "slug": "highest-temperature-in-seoul-on-february-6-2026",
-        "lat": 37.46,
-        "lon": 126.44,
-        "desc": "Seoul Incheon Airport"
-    },
-    "london": {
-        "icao": "EGLC",
-        "slug": "highest-temperature-in-london-on-february-5-2026",
-        "lat": 51.50,
-        "lon": 0.05,
-        "desc": "London City Airport"
-    }
-}
+# 加载预设配置
+def load_presets(json_path="locations.json"):
+    if os.path.exists(json_path):
+        with open(json_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+PRESETS = load_presets()
 
 class WeatherPriceMonitor:
-    def __init__(self, icao_code, event_slug, lat, lon):
+    def __init__(self, icao_code, event_slug, lat, lon, no_tty=False):
         self.icao_code = icao_code
         self.event_slug = event_slug
         self.lat = lat
         self.lon = lon
+        self.no_tty = no_tty
         
         # API URLs
         self.metar_url = f"https://www.aviationweather.gov/api/data/metar?ids={icao_code}&format=json"
@@ -128,10 +121,16 @@ class WeatherPriceMonitor:
             writer.writerow(row)
 
     def display_dashboard(self, timestamp, weather_data, prices):
-        CLEAR, BOLD, CYAN, GREEN, YELLOW, BLUE, RED, RESET = "\033[H\033[J", "\033[1m", "\033[36m", "\033[32m", "\033[33m", "\033[34m", "\033[31m", "\033[0m"
-        print(CLEAR, end="")
+        is_tty = sys.stdout.isatty() and not self.no_tty
+        CLEAR, BOLD, CYAN, GREEN, YELLOW, BLUE, RED, RESET = ("", "", "", "", "", "", "", "")
+        if is_tty:
+            CLEAR, BOLD, CYAN, GREEN, YELLOW, BLUE, RED, RESET = "\033[H\033[J", "\033[1m", "\033[36m", "\033[32m", "\033[33m", "\033[34m", "\033[31m", "\033[0m"
+        
+        if is_tty: print(CLEAR, end="")
+        else: print("\n" + "="*30 + " [ New Log Entry ] " + "="*30)
+        
         print(f"{BOLD}{CYAN}=" * 70)
-        print(f"{BOLD}{CYAN} 🌊  Polymarket Weather Edge - Advanced Dashboard")
+        print(f"{BOLD}{CYAN} POLYMARKET WEATHER MONITOR - ADVANCED")
         print(f"{BOLD}{CYAN}=" * 70 + RESET)
         print(f"{BOLD}Update Time:{RESET} {timestamp} | {BOLD}Station:{RESET} {self.icao_code}")
         print(f"{BOLD}Target Event:{RESET} {self.event_slug}")
@@ -214,6 +213,7 @@ if __name__ == "__main__":
     parser.add_argument("--lat", type=float, help="Latitude")
     parser.add_argument("--lon", type=float, help="Longitude")
     parser.add_argument("--interval", type=int, default=60, help="Refresh interval in seconds")
+    parser.add_argument("--no-tty", action="store_true", help="Disable ANSI escape codes for dashboard")
     
     args = parser.parse_args()
     
@@ -227,6 +227,6 @@ if __name__ == "__main__":
     lat = args.lat if args.lat is not None else conf["lat"]
     lon = args.lon if args.lon is not None else conf["lon"]
     
-    monitor = WeatherPriceMonitor(icao, slug, lat, lon)
+    monitor = WeatherPriceMonitor(icao, slug, lat, lon, no_tty=args.no_tty)
     try: monitor.start(args.interval)
     except KeyboardInterrupt: print("\nStopped.")

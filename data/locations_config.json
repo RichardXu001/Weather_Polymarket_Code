@@ -1,0 +1,18 @@
+{
+    "seoul": {
+        "icao": "RKSI",
+        "slug": "highest-temperature-in-seoul-on-february-6-2026",
+        "lat": 37.46,
+        "lon": 126.44,
+        "tz_offset": 9,
+        "desc": "Seoul Incheon Airport"
+    },
+    "london": {
+        "icao": "EGLC",
+        "slug": "highest-temperature-in-london-on-february-5-2026",
+        "lat": 51.50,
+        "lon": 0.05,
+        "tz_offset": 0,
+        "desc": "London City Airport"
+    }
+}
