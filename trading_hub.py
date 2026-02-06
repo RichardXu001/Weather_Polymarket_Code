@@ -2,12 +2,17 @@ import asyncio
 import logging
 import csv
 import os
+import requests
 from datetime import datetime
+from dotenv import load_dotenv
 from weather_price_monitor import WeatherPriceMonitor
 from engine.config import QuantConfig
 from engine.data_feed import WeatherState
 from engine.strategy import StrategyKernel
 from executor.poly_trader import PolyExecutor
+
+# 加载环境变量
+load_dotenv()
 
 # 配置日志
 logging.basicConfig(
@@ -15,6 +20,40 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("TradingHub")
+
+def send_dingtalk_notification(market, contract, price, v_fit, reason):
+    """发送钉钉交易机会通知"""
+    webhook = os.getenv("DINGTALK_WEBHOOK")
+    if not webhook:
+        logger.warning("钉钉 Webhook 未配置，跳过通知")
+        return
+    
+    # 消息需要包含关键词 "Polymarket"
+    message = f"""🚨 Polymarket 交易机会提醒
+
+📍 市场: {market}
+🎯 目标合约: {contract}
+💰 当前报价: {price:.3f}
+📊 V_fit 拟合值: {v_fit:.2f}
+📝 触发理由: {reason}
+⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+请及时关注市场动态！"""
+    
+    payload = {
+        "msgtype": "text",
+        "text": {"content": message}
+    }
+    
+    try:
+        resp = requests.post(webhook, json=payload, timeout=5)
+        if resp.status_code == 200:
+            logger.info(f"[钉钉] 通知发送成功")
+        else:
+            logger.warning(f"[钉钉] 通知发送失败: {resp.text}")
+    except Exception as e:
+        logger.error(f"[钉钉] 通知发送异常: {e}")
+
 
 class TradingHub:
     """并行多区域交易枢纽"""
@@ -143,7 +182,22 @@ class TradingHub:
                 # 4. 执行决策与记录 (买入时取特定的 best_ask，但录制会录制所有)
                 if signal == 'BUY':
                     best_ask = list(prices.values())[0] if prices else 0.5
+                    # 找到与 v_fit 匹配的合约及其价格
+                    from engine.models import WeatherModel
+                    target_contract = WeatherModel.predict_noaa(v_fit) if v_fit else state.target_temp
+                    contract_price = prices.get(f"price_{int(target_contract)}°C", best_ask)
+                    
+                    # 发送钉钉通知
+                    send_dingtalk_notification(
+                        market=preset_name.upper(),
+                        contract=f"{target_contract}°C",
+                        price=contract_price,
+                        v_fit=v_fit if v_fit else 0.0,
+                        reason=reason
+                    )
+                    
                     await self.executor.execute_trade(signal, monitor.event_slug, best_ask, 100)
+
                 
                 self._record_data(current_recording_file, state, prices, signal, reason)
 
