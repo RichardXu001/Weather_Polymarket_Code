@@ -22,5 +22,13 @@
         "lon": 32.9950,
         "tz_offset": 3,
         "desc": "Ankara Esenboğa Airport"
+    },
+    "nyc": {
+        "icao": "KNYC",
+        "slug_template": "highest-temperature-in-nyc-on-{month}-{day}-{year}",
+        "lat": 40.77,
+        "lon": -73.97,
+        "tz_offset": -5,
+        "desc": "New York Central Park"
     }
 }
