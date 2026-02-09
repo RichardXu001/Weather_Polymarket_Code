@@ -14,5 +14,13 @@
         "lon": 0.05,
         "tz_offset": 0,
         "desc": "London City Airport"
+    },
+    "ankara": {
+        "icao": "LTAC",
+        "slug": "highest-temperature-in-ankara-on-february-8-2026",
+        "lat": 40.1281,
+        "lon": 32.995,
+        "tz_offset": 3,
+        "desc": "Ankara Esenboğa Airport"
     }
 }
