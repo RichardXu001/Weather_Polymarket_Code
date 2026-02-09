@@ -132,14 +132,22 @@ class TradingHub:
                     state.v_fit_history = []
                     logger.info(f"[+] Market Switched to: {slug}")
 
-                # 1. 抓取数据
+                # 1. 检查工作时间 (从 .env 加载的 PEAK_HOUR_START 和 PEAK_HOUR_END)
+                state.local_hour, state.local_time = self._get_local_time_info(tz_offset)
+                if not (self.config.PEAK_HOUR_START <= state.local_hour <= self.config.PEAK_HOUR_END):
+                    # 仅在整分时打印一次日志，避免刷屏
+                    if datetime.now().second < interval:
+                        logger.info(f"[{preset_name:8}] Outside operating hours ({state.local_time}, Range: {self.config.PEAK_HOUR_START}-{self.config.PEAK_HOUR_END}). Sleeping...")
+                    await asyncio.sleep(interval)
+                    continue
+
+                # 2. 抓取数据
                 loop = asyncio.get_event_loop()
                 wd = await loop.run_in_executor(None, monitor.get_weather_data)
                 prices = await loop.run_in_executor(None, monitor.fetch_polymarket_asks)
                 
-                # 2. 更新状态机
+                # 3. 更新状态机
                 state.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                state.local_hour, state.local_time = self._get_local_time_info(tz_offset)
                 
                 # 更新最高温观察值 (仅追踪官方源 NOAA 用于结算 Outcome)
                 sources = wd['sources']
@@ -173,7 +181,6 @@ class TradingHub:
                     if len(hist) > 10: hist.pop(0)
 
                 # 3. 决策
-                state.target_temp = conf.get("target_temp", 8.0) 
                 state.market_prices = prices # 存入全量报价
                 signal, reason, meta = StrategyKernel.calculate_strategy_signals(state, self.config)
                 
@@ -181,22 +188,23 @@ class TradingHub:
 
                 # 4. 执行决策与记录 (买入时取特定的 best_ask，但录制会录制所有)
                 if signal == 'BUY':
-                    best_ask = list(prices.values())[0] if prices else 0.5
                     # 找到与 v_fit 匹配的合约及其价格
                     from engine.models import WeatherModel
-                    target_contract = WeatherModel.predict_noaa(v_fit) if v_fit else state.target_temp
-                    contract_price = prices.get(f"price_{int(target_contract)}°C", best_ask)
+                    target_contract = WeatherModel.predict_noaa(v_fit) if v_fit else 0.0
+                    p_data = prices.get(f"{int(target_contract)}°C") or list(prices.values())[0] if prices else {}
+                    contract_price = p_data.get('yes') if isinstance(p_data, dict) else p_data
                     
                     # 发送钉钉通知
                     send_dingtalk_notification(
                         market=preset_name.upper(),
                         contract=f"{target_contract}°C",
-                        price=contract_price,
+                        price=contract_price if contract_price else 0.0,
                         v_fit=v_fit if v_fit else 0.0,
                         reason=reason
                     )
                     
-                    await self.executor.execute_trade(signal, monitor.event_slug, best_ask, 100)
+                    if contract_price:
+                        await self.executor.execute_trade(signal, monitor.event_slug, contract_price, 100)
 
                 
                 self._record_data(current_recording_file, state, prices, signal, reason)
@@ -221,27 +229,20 @@ class TradingHub:
         
         file_exists = os.path.isfile(filename)
         with open(filename, 'a', newline='') as f:
-            fieldnames = ['date', 'slug_id', 'target_threshold', 'noaa_max', 'result']
+            fieldnames = ['date', 'slug_id', 'noaa_max']
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not file_exists:
                 writer.writeheader()
             
-            # 判定结果 (基于 target_temp 和 NOAA 最高温)
-            if state.max_temp_overall <= -900:
-                result = "DATA_MISSING"
-                actual_max = "N/A"
-            else:
-                result = "UNDER" if state.max_temp_overall <= state.target_temp else "OVER"
-                actual_max = f"{state.max_temp_overall:.2f}"
+            # 记录最高温
+            actual_max = f"{state.max_temp_overall:.2f}" if state.max_temp_overall > -900 else "N/A"
             
             writer.writerow({
                 'date': date_str,
                 'slug_id': slug_id,
-                'target_threshold': state.target_temp,
-                'noaa_max': actual_max,
-                'result': result
+                'noaa_max': actual_max
             })
-            logger.info(f"[✓] Outcome Saved for {preset_name} | Slug: {slug_id} | Max(NOAA): {actual_max} | Result: {result}")
+            logger.info(f"[✓] Daily Summary Saved for {preset_name} | Max(NOAA): {actual_max}")
             
         # 重置最高温以便第二天重新开始
         state.max_temp_overall = -999.0
@@ -282,13 +283,15 @@ class TradingHub:
             'reason': reason
         }
         
-        # 将所有报价平铺到 row 中
+        # 记录 Yes, No 和 Volume
         price_cols = []
         if prices:
-            for title, ask in prices.items():
-                col_name = f"price_{title}"
-                row[col_name] = ask
-                price_cols.append(col_name)
+            for title, p_data in prices.items():
+                if isinstance(p_data, dict):
+                    row[f"{title}_yes"] = p_data.get('yes')
+                    row[f"{title}_no"] = p_data.get('no')
+                    row[f"{title}_vol"] = p_data.get('vol')
+                    price_cols.extend([f"{title}_yes", f"{title}_no", f"{title}_vol"])
 
         with open(filename, 'a', newline='') as f:
             base_fields = [

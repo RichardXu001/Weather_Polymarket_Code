@@ -11,14 +11,14 @@
 # 2. 仅启动伦敦 (London)
 ./venv/bin/python3 trading_hub.py --presets london
 
-# 3. 三地并行监控 (伦敦 + 首尔 + 安卡拉)
-./venv/bin/python3 trading_hub.py --presets london seoul ankara --interval 30
+# 3. 多地并行监控 (伦敦 + 首尔 + 安卡拉 + 纽约)
+./venv/bin/python3 trading_hub.py --presets london seoul ankara nyc --interval 30
 ```
 
 ## 2. 命令行参数详解
 | 参数 | 说明 | 示例 |
 | :--- | :--- | :--- |
-| `--presets` | 运行地点预设，支持 `london`, `seoul`, `ankara` | `--presets london ankara` |
+| `--presets` | 运行地点预设，支持 `london`, `seoul`, `ankara`, `nyc` | `--presets seoul london ankara nyc` |
 | `--interval` | 采样频率(秒)，默认 30s | `--interval 60` |
 
 ---

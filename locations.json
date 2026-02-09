@@ -5,7 +5,6 @@
         "lat": 37.46,
         "lon": 126.44,
         "tz_offset": 9,
-        "target_temp": -5.0,
         "desc": "Seoul Incheon Airport"
     },
     "london": {
@@ -14,7 +13,14 @@
         "lat": 51.50,
         "lon": 0.05,
         "tz_offset": 0,
-        "target_temp": 8.0,
         "desc": "London City Airport"
+    },
+    "ankara": {
+        "icao": "LTAC",
+        "slug_template": "highest-temperature-in-ankara-on-{month}-{day}-{year}",
+        "lat": 40.1281,
+        "lon": 32.9950,
+        "tz_offset": 3,
+        "desc": "Ankara Esenboğa Airport"
     }
 }
