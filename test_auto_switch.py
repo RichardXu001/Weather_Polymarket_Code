@@ -1,9 +1,9 @@
-from trading_hub import TradingHub
+from weather_bot import WeatherBot
 import datetime as dt
 from datetime import timezone, timedelta
 
 def test_switch():
-    hub = TradingHub()
+    hub = WeatherBot()
     preset = "seoul"
     offset = 9
     template = "highest-temperature-in-seoul-on-{month}-{day}-{year}"

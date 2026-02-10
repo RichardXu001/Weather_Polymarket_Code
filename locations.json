@@ -29,6 +29,7 @@
         "lat": 40.77,
         "lon": -73.97,
         "tz_offset": -5,
+        "unit": "F",
         "desc": "New York Central Park"
     }
 }

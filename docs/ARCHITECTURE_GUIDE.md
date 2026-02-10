@@ -1,48 +1,46 @@
-# 天气量化交易系统：架构设计文档 (v1.1)
+# 天气量化交易系统：架构设计文档 (v1.2)
 
 ## 1. 系统概览
-本系统旨在通过自动化方式，利用多源天气数据源与物理拟合模型，在 Polymarket 天气预测市场上执行高胜率的量化对冲。
+本系统旨在通过自动化方式，利用多源天气数据源（NOAA, Open-Meteo, Met.no）与动态判定模型，在 Polymarket 天气预测市场上执行捕捉气温剧变（Drop）的量化策略。
 
 ## 2. 核心架构组件
 
-### 2.1 数据网关 (Data Gateway)
-- **输入源**：NOAA (METAR), Open-Meteo (OM), Met.no (MN), Polymarket Gamma API。
-- **职责**：定时轮询，将异构数据标准化。
+### 2.1 数据采集网关 (Data Ingestion)
+- **多源并发**：并行轮询 NOAA (METAR)、Open-Meteo、Met.no。
+- **动态寻址**：基于 `locations.json` 自动解析经纬度及 **本地时区偏移 (TZ)**。
+- **自适应采样**：支持 30s-60s 差异化采样频率。
 
-### 2.2 物理建模中台 (Physical Modeling Engine)
-- **核心计算**：依据 OM 和 MN 数据计算 `V_fit`（物理估算值），为策略提供趋势预判。
+### 2.2 策略判定内核 (Strategy Kernel - V4.2.2)
+- **三阶段状态机**：根据本地时间自动在“严谨期”、“窗口期”、“灵敏期”间切换配置。
+- **源锚点校验**：各数据源独立维护今日峰值状态，消除绝对值偏差。
+- **价格熔断**：全线集成 > 0.5 USDC 的价格保护。
+- **温标自适应 [NEW]**：根据站点 Preset 自动执行 C/F 换算，并利用正则语义匹配 Polymarket 非标准合约名。
 
-### 2.3 策略决策机 (Strategy Decision Maker)
-- **判定管道 (Pipeline)**：
-    1. **本地时区过滤器**：根据站点 `tz_offset` 验证是否处于本地交易时段。
-    2. **预测值硬约束**：验证 1h Forecast 是否支持趋势。
-    3. **总量共振分析**：基于 `V_fit` 历史序列进行趋势确认。
-    4. **非对称避让逻辑**：执行 [X.5, X.5 + 0.3] 风险评估。
+### 2.3 审计与历史系统 (Auditing & History) [NEW]
+- **实时录制**：记录每一时刻的所有天气源及市场深度。
+- **交易存证**：对每一笔买入/跳过操作生成带逻辑证据的独立日志。
+- **自动化快照**：回测完成后自动生成结构化审计报告 (`.md`)。
 
-### 2.4 地点元数据库 (Location Metadata) [NEW]
-- **配置文件**：`locations.json`。
-- **职责**：通过 ICAO 关联站点经纬度及 **本地时区偏移量**。实现全球站点的“即插即用”。
-
-## 3. 核心逻辑时序
-1. `Tick` -> `TradingHub` 根据 Preset 自动识别时区。
-2. `Modeling` 更新 `V_fit` 历史窗口。
-3. `Decision` 根据 **站点本地时间** 进行窗口拦截。
-4. 满足 `V_fit` 下跌 + 活跃源共振 -> 触发 `BUY`。
-
-## 4. 关键文件布局
+## 3. 核心文件布局
 ```text
 project/
-├── .env                  # 策略核心阈值配置
-├── locations.json        # 站点元数据库
-├── trading_hub.py        # 地点自适应入口 (实盘主程序)
-├── backtest_engine.py    # 多合约扫描回测引擎 (V2.0)
-├── engine/               # 核心引擎目录
-│   ├── strategy.py       # StrategyKernel (实盘/回测共用)
-│   └── models.py         # WeatherModel (V_fit 计算 + predict_noaa)
-└── executor/             # 下单执行目录
+├── data/
+│   ├── recordings/       # 原始天气与市场深度录制 (CSV)
+│   ├── trades/           # [NEW] 独立交易信号存证 (CSV)
+│   └── outcomes/         # 每日最高温结算结果
+├── docs/                 # 技术文档与策略指南
+├── engine/
+│   ├── strategy.py       # 核心决策逻辑 (V4.2.2)
+│   ├── config.py         # 环境参数管理器
+│   └── data_feed.py      # WeatherState 状态定义
+├── backtest_engine.py    # [NEW] 支持多 CSV 自动缝合的回测引擎
+└── weather_bot.py        # 并行多站交易主程序
 ```
 
-## 5. 回测引擎特性 (V2.0)
-- **多合约扫描**: 自动识别 CSV 中所有温度合约
-- **精准匹配**: 仅推荐 `predict_noaa(v_fit) == target` 的合约
-- **逻辑复用**: 100% 调用 `StrategyKernel`，与实盘代码完全一致
+## 4. 回测与验证体系 (V4.2.2)
+- **多 CSV 缝合**: 支持通配符加载断续数据流，自动处理时序重叠。
+- **全维度归因**: 回测生成的 Markdown 报告可精确还原触发时的 Resonance/Duration 原因。
+- **逻辑双子星**: 确保实盘与回测 100% 复用同一判定内核。
+
+---
+*最后更新：2026-02-10 | 文档版本：v1.2*

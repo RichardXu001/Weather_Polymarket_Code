@@ -1,11 +1,11 @@
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
-from trading_hub import TradingHub
+from weather_bot import WeatherBot
 
 class TestMarketSwitch(unittest.TestCase):
     def setUp(self):
-        self.hub = TradingHub()
+        self.hub = WeatherBot()
         self.seoul_template = "highest-temperature-in-seoul-on-{month}-{day}-{year}"
         self.london_template = "highest-temperature-in-london-on-{month}-{day}-{year}"
 

@@ -1,0 +1,51 @@
+[*] 启动全市场扫描回测 | 时区偏移: -5
+--------------------------------------------------------------------------------
+[*] 识别到 14 档合约选项: [23.0, 23.0, 24.0, 24.0, 26.0, 26.0, 28.0, 28.0, 30.0, 30.0, 32.0, 32.0, 34.0, 34.0]
+[*] 诊断 @ 09:30: NOAA=-11.0, Peak=-11.0, DropCount=0
+[*] 诊断 @ 09:47: NOAA=-11.0, Peak=-11.0, DropCount=0
+[*] 诊断 @ 10:03: NOAA=-9.0, Peak=-9.0, DropCount=0
+[*] 诊断 @ 10:17: NOAA=-9.0, Peak=-9.0, DropCount=0
+[*] 诊断 @ 10:31: NOAA=-9.0, Peak=-9.0, DropCount=0
+[*] 诊断 @ 10:45: NOAA=-9.0, Peak=-9.0, DropCount=0
+[*] 诊断 @ 11:00: NOAA=-7.0, Peak=-7.0, DropCount=0
+[*] 诊断 @ 11:15: NOAA=-7.0, Peak=-7.0, DropCount=0
+[*] 诊断 @ 11:29: NOAA=-7.0, Peak=-7.0, DropCount=0
+[*] 诊断 @ 11:44: NOAA=-7.0, Peak=-7.0, DropCount=0
+[*] 诊断 @ 11:59: NOAA=-5.0, Peak=-5.0, DropCount=0
+[*] 诊断 @ 12:14: NOAA=-5.0, Peak=-5.0, DropCount=0
+[*] 诊断 @ 12:28: NOAA=-5.0, Peak=-5.0, DropCount=0
+[*] 诊断 @ 12:42: NOAA=-5.0, Peak=-5.0, DropCount=0
+[*] 诊断 @ 12:57: NOAA=-3.0, Peak=-3.0, DropCount=0
+[*] 诊断 @ 13:12: NOAA=-3.0, Peak=-3.0, DropCount=0
+[*] 诊断 @ 13:26: NOAA=-3.0, Peak=-3.0, DropCount=0
+[*] 诊断 @ 13:40: NOAA=-3.0, Peak=-3.0, DropCount=0
+[*] 诊断 @ 13:55: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 14:09: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 14:24: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 14:37: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 14:51: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 15:06: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 15:20: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 15:33: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 15:47: NOAA=-2.0, Peak=-2.0, DropCount=0
+[*] 诊断 @ 16:02: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 16:15: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 16:29: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 16:42: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 16:56: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 17:10: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 17:23: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 17:37: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 17:50: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 18:04: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 18:18: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 18:31: NOAA=-1.0, Peak=-1.0, DropCount=0
+[*] 诊断 @ 18:45: NOAA=-1.0, Peak=-1.0, DropCount=0
+
+[回测结论]
+分析样本点: 3903 | 触发信号: 1
+--------------------------------------------------------------------------------
+本地时间       | 类型         | 目标     | 价格     | 详情
+17:00      | BUY_FORCE  | 30-31°F | 0.98   | Force buy at 17:00 (V4.2.2)
+--------------------------------------------------------------------------------
+回测结束。最终最高温记录: -1.0

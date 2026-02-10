@@ -18,13 +18,27 @@ def load_presets(json_path="locations.json"):
 PRESETS = load_presets()
 
 class WeatherPriceMonitor:
-    def __init__(self, icao_code, event_slug, lat, lon, no_tty=False):
+    def __init__(self, icao_code, event_slug, lat, lon, tz_offset=0, no_tty=False, city_name=None):
         self.icao_code = icao_code
         self.event_slug = event_slug
         self.lat = lat
         self.lon = lon
+        self.tz_offset = tz_offset
         self.no_tty = no_tty
+        self.city_name = city_name or icao_code.lower()
         
+        # 频率控制与缓存 (V4.1 引入)
+        self.last_om_data = (None, None)
+        self.last_mn_data = (None, None)
+        self.last_om_fetch_time = 0
+        self.last_mn_fetch_time = 0
+        
+        # 创建持久化会话与 User-Agent
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': f'WeatherMonitorBot/2.0 ({self.city_name}; rate-limiting-aware; contact: dev@example.com)'
+        })
+
         # API URLs
         self.metar_url = f"https://www.aviationweather.gov/api/data/metar?ids={icao_code}&format=json"
         self.open_meteo_url = f"https://api.open-meteo.com/v1/forecast?latitude={self.lat}&longitude={self.lon}&current_weather=true&hourly=temperature_2m"
@@ -32,14 +46,18 @@ class WeatherPriceMonitor:
         self.poly_url = f"https://gamma-api.polymarket.com/events?slug={event_slug}"
         
         # CSV Setup
+        data_dir = "data/recordings"
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir, exist_ok=True)
+            
         start_time_str = datetime.now().strftime('%Y%m%d_%H%M')
-        self.csv_file = f"weather_edge_{icao_code}_{start_time_str}.csv"
+        self.csv_file = f"{data_dir}/weather_recording_{self.city_name}_{start_time_str}.csv"
         self.columns = []
 
     def fetch_noaa(self):
         """Source 1: NOAA/METAR (Real-time Observation ONLY)"""
         try:
-            r = requests.get(self.metar_url, timeout=10)
+            r = self.session.get(self.metar_url, timeout=10)
             if r.status_code == 200:
                 data = r.json()
                 if data:
@@ -48,50 +66,129 @@ class WeatherPriceMonitor:
                     if match:
                         t = match.group(1)
                         return -float(t[1:]) if t.startswith('M') else float(t)
-        except: pass
+            elif r.status_code == 429:
+                print(f"⚠️ [NOAA] Rate limit triggered (429) for {self.city_name}")
+        except Exception as e:
+            print(f"❌ [NOAA] Error fetching data for {self.city_name}: {e}")
         return None
 
-    def fetch_open_meteo(self):
-        """Source 2: Open-Meteo (Current + Forecast)"""
+    def fetch_open_meteo(self, interval=60):
+        """Source 2: Open-Meteo (Current + Forecast) - 带频率控制与前向填充"""
+        now = time.time()
+        # 频率自律：未到采样时间，且已有缓存，则沿用缓存 (Forward Fill)
+        if now - self.last_om_fetch_time < interval and self.last_om_data[0] is not None:
+            return self.last_om_data
+
         try:
-            r = requests.get(self.open_meteo_url, timeout=10)
+            r = self.session.get(self.open_meteo_url, timeout=10)
             if r.status_code == 200:
                 data = r.json()
                 curr = data.get('current_weather', {}).get('temperature')
                 hourly = data.get('hourly', {}).get('temperature_2m', [])
                 forecast_1h = hourly[1] if len(hourly) > 1 else None
-                return curr, forecast_1h
-        except: pass
-        return None, None
+                self.last_om_data = (curr, forecast_1h)
+                self.last_om_fetch_time = now
+                return self.last_om_data
+            elif r.status_code == 429:
+                print(f"⚠️ [Open-Meteo] Rate limit triggered (429) for {self.city_name}, cooling down...")
+                # 记录最后尝试时间，维持冷却
+                self.last_om_fetch_time = now
+            else:
+                print(f"❌ [Open-Meteo] Unexpected Status {r.status_code} for {self.city_name}")
+        except requests.exceptions.Timeout:
+            print(f"⏳ [Open-Meteo] Request timeout for {self.city_name}")
+        except Exception as e:
+            print(f"❌ [Open-Meteo] Error: {e}")
+            
+        return self.last_om_data # 失败或流控时返回缓存
 
-    def fetch_met_no(self):
-        """Source 3: Met.no (Current + Forecast)"""
+    def fetch_met_no(self, interval=60):
+        """Source 3: Met.no (Current + Forecast) - 带频率控制与前向填充"""
+        now = time.time()
+        if now - self.last_mn_fetch_time < interval and self.last_mn_data[0] is not None:
+            return self.last_mn_data
+
         try:
-            headers = {'User-Agent': 'WeatherMonitorBot/1.0'}
-            r = requests.get(self.met_no_url, headers=headers, timeout=10)
+            r = self.session.get(self.met_no_url, timeout=10)
             if r.status_code == 200:
                 data = r.json()
                 timeseries = data.get('properties', {}).get('timeseries', [])
                 if timeseries:
                     curr = timeseries[0].get('data', {}).get('instant', {}).get('details', {}).get('air_temperature')
                     forecast_1h = timeseries[1].get('data', {}).get('instant', {}).get('details', {}).get('air_temperature')
-                    return curr, forecast_1h
-        except: pass
-        return None, None
+                    self.last_mn_data = (curr, forecast_1h)
+                    self.last_mn_fetch_time = now
+                    return self.last_mn_data
+            elif r.status_code == 429:
+                print(f"⚠️ [Met.no] Rate limit triggered (429) for {self.city_name}, cooling down...")
+                self.last_mn_fetch_time = now
+            elif r.status_code >= 400:
+                print(f"❌ [Met.no] Status {r.status_code} for {self.city_name}. Data might be missing.")
+        except Exception as e:
+            print(f"❌ [Met.no] Error: {e}")
+            
+        return self.last_mn_data
 
     def fetch_polymarket_asks(self):
         results = {}
         try:
-            r = requests.get(self.poly_url, timeout=15)
+            r = self.session.get(self.poly_url, timeout=15)
             if r.status_code == 200:
                 data = r.json()
                 if data:
                     markets = data[0].get('markets', [])
                     for m in markets:
+                        # 统一使用 groupItemTitle 作为键，例如 "2°C"
                         title = m.get('groupItemTitle', m.get('question'))
-                        results[title] = m.get('bestAsk')
-        except: pass
+                        yes_ask = m.get('bestAsk')
+                        yes_bid = m.get('bestBid')
+                        
+                        # No 的报价推导：No Ask = 1 - Yes Bid, No Bid = 1 - Yes Ask
+                        no_ask = (1 - float(yes_bid)) if yes_bid else None
+                        no_bid = (1 - float(yes_ask)) if yes_ask else None
+                        
+                        results[title] = {
+                            'yes_ask': yes_ask,
+                            'yes_bid': yes_bid,
+                            'no_ask': no_ask,
+                            'no_bid': no_bid,
+                            'vol': m.get('volumeClob')
+                        }
+            elif r.status_code == 429:
+                print(f"⚠️ [Polymarket] Rate limit triggered (429) for {self.city_name}")
+        except Exception as e:
+            print(f"❌ Error fetching Polymarket prices for {self.city_name}: {e}")
         return results
+
+    def fetch_all_sources(self, om_interval=60, mn_interval=60):
+        """获取所有数据源 (取代原 get_weather_data 以兼容 bot 调用)"""
+        source_fetchers = {
+            "NOAA (METAR)": lambda: (self.fetch_noaa(), None),
+            "Open-Meteo": lambda: self.fetch_open_meteo(om_interval),
+            "Met.no": lambda: self.fetch_met_no(mn_interval)
+        }
+        
+        sources = {}
+        for name, fetcher in source_fetchers.items():
+            try:
+                curr, fore = fetcher()
+                sources[name] = {"curr": curr, "fore": fore}
+            except Exception as e:
+                print(f"⚠️ Unexpected fetcher error for {name}: {e}")
+                sources[name] = {"curr": None, "fore": None}
+                
+        valid_curr = [v['curr'] for v in sources.values() if v['curr'] is not None]
+        avg_curr = sum(valid_curr) / len(valid_curr) if valid_curr else None
+        
+        valid_fore = [v['fore'] for v in sources.values() if v['fore'] is not None]
+        avg_fore = sum(valid_fore) / len(valid_fore) if valid_fore else None
+        
+        div = (max(valid_curr) - min(valid_curr)) if len(valid_curr) > 1 else 0
+        return {"sources": sources, "avg_curr": avg_curr, "avg_fore": avg_fore, "divergence": div}
+
+    def get_weather_data(self):
+        """保持向前兼容"""
+        return self.fetch_all_sources()
 
     def log_to_csv(self, timestamp, wd, prices):
         row = {
@@ -105,22 +202,39 @@ class WeatherPriceMonitor:
             "MN_ACTUAL": wd['sources']['Met.no']['curr'],
             "MN_FORECAST": wd['sources']['Met.no']['fore']
         }
-        row.update(prices)
+        
+        # 录制 Yes/No 的 Ask1/Bid1 与成交量
+        for title, p_data in prices.items():
+            if isinstance(p_data, dict):
+                row[f"{title}_yes_ask"] = p_data.get('yes_ask')
+                row[f"{title}_yes_bid"] = p_data.get('yes_bid')
+                row[f"{title}_no_ask"] = p_data.get('no_ask')
+                row[f"{title}_no_bid"] = p_data.get('no_bid')
+                row[f"{title}_vol"] = p_data.get('vol')
 
         if not self.columns:
+            # 基础列
             base_cols = [
                 "timestamp", "consensus_actual", "consensus_forecast", "divergence",
                 "NO_ACTUAL", "OM_ACTUAL", "OM_FORECAST", "MN_ACTUAL", "MN_FORECAST"
             ]
-            self.columns = base_cols + sorted(list(prices.keys()))
+            # 动态推导价格列 (即便当前没有拿到，理想情况下以后会有)
+            price_cols = []
+            for title in sorted(prices.keys()):
+                price_cols.extend([
+                    f"{title}_yes_ask", f"{title}_yes_bid", 
+                    f"{title}_no_ask", f"{title}_no_bid", 
+                    f"{title}_vol"
+                ])
+            self.columns = base_cols + price_cols
 
         exists = os.path.isfile(self.csv_file)
         with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=self.columns)
+            writer = csv.DictWriter(f, fieldnames=self.columns, extrasaction='ignore')
             if not exists: writer.writeheader()
             writer.writerow(row)
 
-    def display_dashboard(self, timestamp, weather_data, prices):
+    def display_dashboard(self, timestamp, local_time_str, weather_data, prices):
         is_tty = sys.stdout.isatty() and not self.no_tty
         CLEAR, BOLD, CYAN, GREEN, YELLOW, BLUE, RED, RESET = ("", "", "", "", "", "", "", "")
         if is_tty:
@@ -129,20 +243,20 @@ class WeatherPriceMonitor:
         if is_tty: print(CLEAR, end="")
         else: print("\n" + "="*30 + " [ New Log Entry ] " + "="*30)
         
-        print(f"{BOLD}{CYAN}=" * 70)
-        print(f"{BOLD}{CYAN} POLYMARKET WEATHER MONITOR - ADVANCED")
-        print(f"{BOLD}{CYAN}=" * 70 + RESET)
-        print(f"{BOLD}Update Time:{RESET} {timestamp} | {BOLD}Station:{RESET} {self.icao_code}")
-        print(f"{BOLD}Target Event:{RESET} {self.event_slug}")
-        print("-" * 70)
+        print(f"{BOLD}{CYAN}=" * 80)
+        print(f"{BOLD}{CYAN} POLYMARKET WEATHER MONITOR - ADVANCED (BID/ASK/LAST)")
+        print(f"{BOLD}{CYAN}=" * 80 + RESET)
+        print(f"{BOLD}Update Time:{RESET} {timestamp} | {BOLD}Local Time:{RESET} {local_time_str} ({self.tz_offset:+d}h)")
+        print(f"{BOLD}Station:{RESET} {self.icao_code} | {BOLD}Target Event:{RESET} {self.event_slug}")
+        print("-" * 80)
         sources = weather_data['sources']
         print(f"{BOLD}{'Weather Source':20} | {'Current':>10} | {'+1H Forecast':>12}{RESET}")
-        print("-" * 70)
+        print("-" * 80)
         for name, d in sources.items():
             curr = f"{YELLOW}{d['curr']:>9.1f}°C{RESET}" if d['curr'] is not None else f"{RED}{'N/A':>10}{RESET}"
             fore = f"{BLUE}{d['fore']:>11.1f}°C{RESET}" if d['fore'] is not None else f"{BLUE}{'N/A':>12}{RESET}"
             print(f"{name:20} | {curr} | {fore}")
-        print("-" * 70)
+        print("-" * 80)
         avg = weather_data['avg_curr']
         fore_avg = weather_data['avg_fore']
         trend_icon = "📈" if (fore_avg and avg and fore_avg > avg) else "📉"
@@ -152,52 +266,48 @@ class WeatherPriceMonitor:
         print(f"{BOLD}CONSENSUS CURRENT: {avg_str}    |    +1H FORECAST: {fore_str}")
         if weather_data['divergence'] > 0.8:
             print(f"{BOLD}{RED}⚠️  HIGH DIVERGENCE ALERT: Sources differ by {weather_data['divergence']:.1f}°C!{RESET}")
-        print("-" * 70)
+        print("-" * 80)
         if prices:
-            print(f"{BOLD}{'Target Range':40} | {'Ask1':>10} | {'Confidence'}{RESET}")
+            print(f"{BOLD}{'Target Range':35} | {'YES Bid/Ask':>13} | {'NO Bid/Ask':>13} | {'Confidence'}{RESET}")
             for title in sorted(prices.keys()):
-                ask = prices[title]
-                if ask:
-                    bar_len = int(float(ask) * 15)
-                    print(f"{title:40} | {GREEN}${ask:<8}{RESET} | {'█'*bar_len}{'░'*(15-bar_len)}")
-        print("-" * 70)
-        print(f"{BLUE}CSV: {self.csv_file}{RESET}")
-        print(f"{BOLD}{CYAN}=" * 70 + RESET)
-
-    def get_weather_data(self):
-        """获取所有已激活数据源的数据并计算共识"""
-        # 定义所有可用的数据获取方法
-        source_fetchers = {
-            "NOAA (METAR)": lambda: (self.fetch_noaa(), None),
-            "Open-Meteo": self.fetch_open_meteo,
-            "Met.no": self.fetch_met_no
-        }
-        
-        sources = {}
-        for name, fetcher in source_fetchers.items():
-            try:
-                curr, fore = fetcher()
-                sources[name] = {"curr": curr, "fore": fore}
-            except:
-                sources[name] = {"curr": None, "fore": None}
+                p = prices[title]
+                # Confidence bar based on YES ASK price
+                ref_price = float(p.get('yes_ask') or 0)
+                bar_len = int(ref_price * 15)
                 
-        valid_curr = [v['curr'] for v in sources.values() if v['curr'] is not None]
-        avg_curr = sum(valid_curr) / len(valid_curr) if valid_curr else None
-        
-        valid_fore = [v['fore'] for v in sources.values() if v['fore'] is not None]
-        avg_fore = sum(valid_fore) / len(valid_fore) if valid_fore else None
-        
-        div = max(valid_curr) - min(valid_curr) if len(valid_curr) > 1 else 0
-        return {"sources": sources, "avg_curr": avg_curr, "avg_fore": avg_fore, "divergence": div}
+                yes_ask = p.get('yes_ask')
+                yes_bid = p.get('yes_bid')
+                no_ask = p.get('no_ask')
+                no_bid = p.get('no_bid')
+                
+                y_ask_str = f"{GREEN}${yes_ask:<5}{RESET}" if yes_ask else "N/A"
+                y_bid_str = f"{RED}${yes_bid:<5}{RESET}" if yes_bid else "N/A"
+                n_ask_str = f"{YELLOW}${no_ask:<5}{RESET}" if no_ask else "N/A"
+                n_bid_str = f"{BLUE}${no_bid:<5}{RESET}" if no_bid else "N/A"
+                
+                print(f"{title:35} | {y_bid_str}/{y_ask_str} | {n_bid_str}/{n_ask_str} | {'█'*bar_len}{'░'*(15-bar_len)}")
+        print("-" * 80)
+        print(f"{BLUE}CSV: {self.csv_file}{RESET}")
+        print(f"{BOLD}{CYAN}=" * 80 + RESET)
+
 
     def run_once(self):
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        from datetime import timezone
+        
+        # System time (usually UTC on servers)
+        now_utc = datetime.now(timezone.utc)
+        now_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
+        
+        # Calculate Local Time
+        local_dt = now_utc + timedelta(hours=self.tz_offset)
+        local_time_str = local_dt.strftime('%H:%M:%S')
+        
         wd = self.get_weather_data()
         prices = self.fetch_polymarket_asks()
         
-        self.display_dashboard(now, wd, prices)
+        self.display_dashboard(now_str, local_time_str, wd, prices)
         if wd['avg_curr'] is not None or prices:
-            self.log_to_csv(now, wd, prices)
+            self.log_to_csv(now_str, wd, prices)
 
     def start(self, interval=60):
         while True:
@@ -212,7 +322,7 @@ if __name__ == "__main__":
     parser.add_argument("--slug", help="Polymarket event slug")
     parser.add_argument("--lat", type=float, help="Latitude")
     parser.add_argument("--lon", type=float, help="Longitude")
-    parser.add_argument("--interval", type=int, default=60, help="Refresh interval in seconds")
+    parser.add_argument("--interval", type=int, default=10, help="Refresh interval in seconds")
     parser.add_argument("--no-tty", action="store_true", help="Disable ANSI escape codes for dashboard")
     
     args = parser.parse_args()
@@ -226,7 +336,9 @@ if __name__ == "__main__":
     slug = args.slug or conf["slug"]
     lat = args.lat if args.lat is not None else conf["lat"]
     lon = args.lon if args.lon is not None else conf["lon"]
+    tz_offset = conf.get("tz_offset", 0)
     
-    monitor = WeatherPriceMonitor(icao, slug, lat, lon, no_tty=args.no_tty)
+    city_name = args.preset if args.preset else (args.icao.lower() if args.icao else "manual")
+    monitor = WeatherPriceMonitor(icao, slug, lat, lon, tz_offset, no_tty=args.no_tty, city_name=city_name)
     try: monitor.start(args.interval)
     except KeyboardInterrupt: print("\nStopped.")

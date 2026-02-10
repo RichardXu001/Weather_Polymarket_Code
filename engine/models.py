@@ -54,3 +54,15 @@ class WeatherModel:
             return 1
             
         return 0
+
+    @staticmethod
+    def get_drop_count(values):
+        """计算序列中的下跌步数"""
+        if len(values) < 2:
+            return 0
+        drops = 0
+        for i in range(1, len(values)):
+            if values[i] < values[i-1]:
+                drops += 1
+        return drops
+
