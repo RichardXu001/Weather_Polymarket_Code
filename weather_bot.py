@@ -11,9 +11,15 @@ from engine.config import QuantConfig
 from engine.data_feed import WeatherState
 from engine.strategy import StrategyKernel
 from executor.poly_trader import PolyExecutor
+from src.monitor.position_manager import PositionManager
 
 # 加载环境变量
 load_dotenv()
+
+import time
+
+# 全局启动时间，用于静默期判断
+_STARTUP_TIME = time.time()
 
 # 配置日志
 logging.basicConfig(
@@ -23,7 +29,11 @@ logging.basicConfig(
 logger = logging.getLogger("WeatherBot")
 
 def send_dingtalk_notification(market, contract, price, shares, reason):
-    """发送钉钉交易机会通知"""
+    """发送钉钉交易机会通知 (增加启动静默期)"""
+    if time.time() - _STARTUP_TIME < 60:
+        logger.info(f"[钉钉] 启动静默期，忽略通知: {market} {reason}")
+        return
+        
     webhook = os.getenv("DINGTALK_WEBHOOK")
     if not webhook:
         logger.warning("钉钉 Webhook 未配置，跳过通知")
@@ -65,6 +75,7 @@ class WeatherBot:
     def __init__(self):
         self.config = QuantConfig
         self.executor = PolyExecutor(self.config)
+        self.pos_manager = PositionManager()
         
     def _get_local_time_info(self, offset):
         """获取站点本地时间信息: (小时浮点数, HH:MM 字符串)"""
@@ -296,9 +307,14 @@ class WeatherBot:
                         state.has_traded_today = True
                         logger.info(f"[{preset_name:8}] ⚡ Trade Triggered ({signal}). Daily trade locked.")
 
-                        # 5. 独立交易存证 (New Feature)
-                        self._record_trade_event(
-                            preset_name=preset_name,
+                        # 记录交易事件并开始追踪生命周期
+                        order_id = f"dry_{int(datetime.now().timestamp())}"
+                        if not self.config.DRY_RUN:
+                            # 实际下单时应从执行器获取真实 OrderID
+                            # 这里假设执行器返回结果中包含 order_id
+                            pass 
+
+                        self.pos_manager.record_pending_order(
                             city_name=conf.get("city_name", preset_name),
                             local_time=state.local_time,
                             signal=signal,
@@ -306,7 +322,9 @@ class WeatherBot:
                             contract=target_contract,
                             price=price_val,
                             shares=self.config.TRADE_SHARES,
-                            reason=reason
+                            reason=reason,
+                            order_id=order_id,
+                            is_dry_run=self.config.DRY_RUN
                         )
                 
                 self._record_data(current_recording_file, state, prices, signal, reason)
@@ -478,8 +496,44 @@ class WeatherBot:
         logger.info(f"[*] Launching Multi-Location Engine: {presets}")
         logger.info(f"[*] Mode: {'DRY RUN' if self.config.DRY_RUN else 'REAL'}")
         
+        # 启动后台持仓监控与报告任务
+        asyncio.create_task(self.monitor_and_report_loop(presets))
+        
         tasks = [self.run_location_loop(p, interval) for p in presets]
         await asyncio.gather(*tasks)
+
+    async def monitor_and_report_loop(self, presets, report_interval_hours=4):
+        """每隔 4 小时更新一次状态并发送钉钉汇总报告"""
+        logger.info(f"[*] Postion Monitor Loop Started (Interval: {report_interval_hours}h)")
+        
+        while True:
+            # 首先等待间隔时间，避免启动时立即推送
+            await asyncio.sleep(report_interval_hours * 3600)
+            try:
+                # 1. 更新所有地点的持仓状态
+                for p in presets:
+                    self.pos_manager.update_positions_status(p)
+                
+                # 2. 生成汇总报告并发送
+                report_text = self.pos_manager.get_summary_report()
+                
+                webhook = os.getenv("DINGTALK_WEBHOOK")
+                if webhook:
+                    payload = {
+                        "msgtype": "markdown",
+                        "markdown": {
+                            "title": "Polymarket 持仓报告",
+                            "text": report_text
+                        }
+                    }
+                    requests.post(webhook, json=payload, timeout=10)
+                    logger.info("[监控] 已发送每 4 小时持仓汇总报告")
+                else:
+                    logger.warning("[监控] 钉钉 Webhook 未配置，无法发送汇总报告")
+
+            except Exception as e:
+                logger.error(f"[监控] 报告循环异常: {e}")
+
 
 if __name__ == "__main__":
     import argparse

@@ -142,10 +142,12 @@ class StrategyKernel:
             
         h = state.local_hour
         
-        # 1. 强买触发 (17:00 后)
+        # 1. 强买触发 (仅在 FORCE_BUY_TIME 后的 3 分钟内触发，避免全天候挂机启动推送)
         effective_max = max(state.noaa_now, daily_max_temp) if daily_max_temp is not None else state.noaa_now
-        if h >= config.FORCE_BUY_TIME:
+        if h >= config.FORCE_BUY_TIME and h < (config.FORCE_BUY_TIME + 0.05):
             return 'BUY_FORCE', f"Force buy at {state.local_time} ({version})", effective_max
+
+
             
         if h < config.PEAK_TRIGGER_START:
             return 'IDLE', f"Before trigger window ({state.local_time})", None
