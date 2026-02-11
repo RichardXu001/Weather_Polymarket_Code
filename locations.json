@@ -24,12 +24,12 @@
         "desc": "Ankara Esenboğa Airport"
     },
     "nyc": {
-        "icao": "KNYC",
+        "icao": "KLGA",
         "slug_template": "highest-temperature-in-nyc-on-{month}-{day}-{year}",
         "lat": 40.77,
-        "lon": -73.97,
+        "lon": -73.87,
         "tz_offset": -5,
         "unit": "F",
-        "desc": "New York Central Park"
+        "desc": "New York LaGuardia Airport"
     }
 }
