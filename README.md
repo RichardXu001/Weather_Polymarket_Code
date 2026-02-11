@@ -1,64 +1,116 @@
-# 🌦️ Weather & Polymarket Edge 监控系统
+# Polymarket Weather Bot (V4.2.2+FGV2)
 
-本系统用于实时监控首尔机场气温与 Polymarket 预测市场价格，通过多源数据校验（NOAA, Open-Meteo, Met.no）和 1 小时趋势预报辅助交易决策。
+自动化天气交易机器人，面向 Polymarket `Highest Temperature` 市场。  
+当前实盘逻辑为 `V4.2.2 + Forecast Guard V2`：保留三阶段下跌触发，同时用预测风控拦截夜间回暖风险。
 
-## 1. 快速启动 (生产环境)
-核心入口为 `trading_hub.py`，支持多区域并行监控与自动交易：
+## 1. 快速启动
+
+### 1.1 运行模式
+- `DRY_RUN=true`：模拟模式（默认推荐）
+- `DRY_RUN=false`：实盘模式
+
+### 1.2 启动命令与参数
+基本运行（默认使用 `.env` 中的 `DRY_RUN` 配置）：
 ```bash
-# 1. 默认启动 (伦敦 + 首尔 并行)
-./venv/bin/python3 trading_hub.py
-
-# 2. 仅启动伦敦 (London)
-./venv/bin/python3 trading_hub.py --presets london
-
-# 3. 多地并行监控 (伦敦 + 首尔 + 安卡拉 + 纽约)
-./venv/bin/python3 trading_hub.py --presets london seoul ankara nyc --interval 30
+./venv/bin/python3 weather_bot.py
 ```
 
-## 2. 命令行参数详解
-| 参数 | 说明 | 示例 |
-| :--- | :--- | :--- |
-| `--presets` | 运行地点预设，支持 `london`, `seoul`, `ankara`, `nyc` | `--presets seoul london ankara nyc` |
-| `--interval` | 采样频率(秒)，默认 30s | `--interval 60` |
+**命令行覆盖模式（推荐）**：  
+使用以下参数可以强制指定运行模式，优先级高于 `.env`：
+- `./venv/bin/python3 weather_bot.py --dry-run` : 强制模拟模式
+- `./venv/bin/python3 weather_bot.py --real`    : 强制实盘模式（有风险提示）
+
+**其他常用参数**：
+- `./venv/bin/python3 weather_bot.py --presets seoul nyc` : 仅运行特定地点
+- `./venv/bin/python3 weather_bot.py --interval 10`       : 修改采样间隔（秒）
+
+## 2. 当前策略要点
+
+### 2.1 交易触发（V4.2.2）
+- 三阶段时窗：Phase1/Phase2/Phase3（本地时间）
+- 多源共振：NOAA + OM + MN
+- 17:00 `BUY_FORCE`（但会被 Forecast Guard 风控锁拦截）
+- 价格保护：`yes_ask <= 0.5` 跳过
+
+### 2.2 Forecast Guard V2（FGV2）
+- 从本地 12:00 开始，每 30 分钟重算风险
+- 预报先做 bias 校正：`bias = NOAA当前 - 预报当前`
+- 风险命中即锁仓（禁止 `BUY_DROP`/`BUY_FORCE`）：
+  - `NightPeak >= AfternoonPeak - 1.5C`
+  - `NightPeak >= DayMaxSoFar - 0.5C`
+  - `未来3小时升温 >= 0.8C`
+- 解锁要求：峰值过去 + 多源实测连续降温 + 未来2小时不再明显回暖
+
+详细说明见：
+- `docs/STRATEGY_DYNAMIC_DROP.md`
+- `docs/ARCHITECTURE_GUIDE.md`
+
+## 3. 数据源
+
+### 3.1 全球实测
+- AviationWeather METAR（NOAA）
+
+### 3.2 全球预报
+- Open-Meteo `ecmwf_ifs`
+- Open-Meteo `gfs_global`
+- MET Norway `locationforecast`
+- Met Office DataHub `site-specific`（已验证可用于 4 地）
+
+## 4. 关键配置（.env）
+
+### 4.1 基础
+```env
+DRY_RUN=true
+ENABLE_LONDON=true
+ENABLE_NEW_YORK=true
+ENABLE_SEOUL=true
+ENABLE_ANKARA=true
+```
+
+### 4.2 Forecast Guard V2
+```env
+FORECAST_GUARD_ENABLED=true
+FORECAST_GUARD_FAIL_SAFE=true
+FORECAST_GUARD_RECALC_INTERVAL_SECONDS=1800
+FORECAST_GUARD_RISK_SOURCE_THRESHOLD=1
+FORECAST_GUARD_NEAR_DELTA_C=1.5
+FORECAST_GUARD_NEW_HIGH_DELTA_C=0.5
+FORECAST_GUARD_REBOUND_DELTA_3H_C=0.8
+FORECAST_GUARD_PEAK_PASSED_MINUTES=30
+FORECAST_GUARD_UNLOCK_NOAA_DROP_C=0.3
+FORECAST_GUARD_UNLOCK_AUX_DROP_C=0.2
+FORECAST_GUARD_UNLOCK_FUTURE_WARMING_C=0.2
+```
+
+### 4.3 Met Office site-specific
+```env
+METOFFICE_SITE_SPECIFIC_API_KEY=
+METOFFICE_SITE_SPECIFIC_BASE_URL=https://gateway.api-management.metoffice.cloud
+METOFFICE_SITE_SPECIFIC_CONTEXT=/sitespecific/v0
+METOFFICE_SITE_SPECIFIC_INTERVAL_SECONDS=1800
+```
+
+## 5. 常用脚本
+
+- 12 小时多源预报抓取：
+```bash
+python3 scripts/fetch_12h_forecasts.py
+```
+
+- 全球源可用性探测：
+```bash
+python3 scripts/probe_global_forecast_sources.py
+```
+
+## 6. 目录
+
+- `weather_bot.py`：实盘主循环
+- `engine/strategy.py`：V4.2.2 触发内核
+- `engine/forecast_guard.py`：FGV2 风控锁/解锁
+- `engine/config.py`：参数配置
+- `data/recordings/`：实时录制
+- `data/trades/`：交易存证
+- `docs/`：策略与架构文档
 
 ---
-
-## 3. 辅助监控工具 (单项调试)
-如果只想快速查看某一地点的可视化仪表盘而不参与交易：
-```bash
-./venv/bin/python3 weather_price_monitor.py --preset london
-```
-
-## 2. 核心功能说明
-
-### 2.1 多源气象监控 (3D Sync)
-集成三个权威数据源以降低单一源风险：
-- **NOAA (METAR)**：官方实测真值（结算核心参考）。
-- **Open-Meteo / Met.no**：提供实时值与 **+1 小时趋势预报**。
-- **共识逻辑**：自动计算三方平均值，并在分歧过大（> 0.8°C）时发出警告。
-
-### 2.2 决策看板
-实时采集 Polymarket 对应事件的所有选项价格，并以“信心进度条”形式展示，直观反映市场热度。
-
-### 2.3 自动日志 (CSV)
-每次运行会自动生成 `weather_edge_[ICAO]_[时间].csv`，记录所有原始数据。
-
-## 3. 版本管理 (Git)
-项目已初始化 Git 仓库。每次修改逻辑后，建议执行：
-```bash
-git add .
-git commit -m "描述您的修改"
-```
-
-## 3. CSV 字段含义
-| 字段 | 含义 |
-| :--- | :--- |
-| `NO_ACTUAL` | **机场官方实测气温**（结算依据） |
-| `consensus_actual` | 三个来源的当前共识平均温 |
-| `consensus_forecast` | 预测的 1 小时后气温 |
-| `divergence` | 数据源分歧度（越小越可靠） |
-| `OM_... / MN_...` | Open-Meteo 与 Met.no 的明细读数 |
-
-## 4. 特别提示
-- **结算规则**：Polymarket 通常以整数结算，若气温在 -4.5°C 这种边界点波动，风险极高。
-- **冷空气路径**：深冬时节最高温未必出现在下午，请结合预报趋势图进行决策。
+免责声明：仅供研究，实盘盈亏自负。

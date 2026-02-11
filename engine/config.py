@@ -94,6 +94,37 @@ class QuantConfig:
                 ACTIVE_LOCATIONS.append(internal_key)
         elif internal_key in _active_raw:
             ACTIVE_LOCATIONS.append(internal_key)
+
+    # 8. Forecast Guard V2 (30min recalculation + risk lock)
+    FORECAST_GUARD_ENABLED = os.getenv("FORECAST_GUARD_ENABLED", "true").lower() == "true"
+    FORECAST_GUARD_FAIL_SAFE = os.getenv("FORECAST_GUARD_FAIL_SAFE", "true").lower() == "true"
+    FORECAST_GUARD_RECALC_INTERVAL_SECONDS = int(os.getenv("FORECAST_GUARD_RECALC_INTERVAL_SECONDS", 1800))
+    FORECAST_GUARD_RISK_SOURCE_THRESHOLD = int(os.getenv("FORECAST_GUARD_RISK_SOURCE_THRESHOLD", 1))
+
+    # Risk conditions
+    FORECAST_GUARD_NEAR_DELTA_C = float(os.getenv("FORECAST_GUARD_NEAR_DELTA_C", 1.5))
+    FORECAST_GUARD_NEW_HIGH_DELTA_C = float(os.getenv("FORECAST_GUARD_NEW_HIGH_DELTA_C", 0.5))
+    FORECAST_GUARD_REBOUND_DELTA_3H_C = float(os.getenv("FORECAST_GUARD_REBOUND_DELTA_3H_C", 0.8))
+
+    # Unlock conditions
+    FORECAST_GUARD_PEAK_PASSED_MINUTES = int(os.getenv("FORECAST_GUARD_PEAK_PASSED_MINUTES", 30))
+    FORECAST_GUARD_UNLOCK_NOAA_DROP_C = float(os.getenv("FORECAST_GUARD_UNLOCK_NOAA_DROP_C", 0.3))
+    FORECAST_GUARD_UNLOCK_AUX_DROP_C = float(os.getenv("FORECAST_GUARD_UNLOCK_AUX_DROP_C", 0.2))
+    FORECAST_GUARD_UNLOCK_FUTURE_WARMING_C = float(
+        os.getenv("FORECAST_GUARD_UNLOCK_FUTURE_WARMING_C", 0.2)
+    )
+    # [NEW] 极值时间感知策略相关
+    FORECAST_GUARD_PEAK_THRESHOLD_C = float(os.getenv("FORECAST_GUARD_PEAK_THRESHOLD_C", 1.5))
+    FORECAST_GUARD_PEAK_PROMINENCE_C = float(os.getenv("FORECAST_GUARD_PEAK_PROMINENCE_C", 0.3))
+
+    # Met Office site-specific (global point hourly API)
+    METOFFICE_SITE_SPECIFIC_API_KEY = os.getenv("METOFFICE_SITE_SPECIFIC_API_KEY", "")
+    METOFFICE_SITE_SPECIFIC_BASE_URL = os.getenv(
+        "METOFFICE_SITE_SPECIFIC_BASE_URL",
+        "https://gateway.api-management.metoffice.cloud",
+    )
+    METOFFICE_SITE_SPECIFIC_CONTEXT = os.getenv("METOFFICE_SITE_SPECIFIC_CONTEXT", "/sitespecific/v0")
+    METOFFICE_SITE_SPECIFIC_INTERVAL_SECONDS = int(os.getenv("METOFFICE_SITE_SPECIFIC_INTERVAL_SECONDS", 1800))
     
     @classmethod
     def to_dict(cls):

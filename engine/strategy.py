@@ -128,11 +128,22 @@ class StrategyKernel:
         }
 
     @staticmethod
-    def calculate_noaa_drop_signal(state: WeatherState, config: QuantConfig, daily_max_temp: float, has_traded: bool):
+    def calculate_noaa_drop_signal(
+        state: WeatherState,
+        config: QuantConfig,
+        daily_max_temp: float,
+        has_traded: bool,
+        forecast_guard: dict = None,
+    ):
         """
         增强版 NOAA 动态下跌策略 (V4.2.2 - 三阶段参数化 + 开关集成)
         """
-        version = "V4.2.2" 
+        version = "V4.2.2+FGV2"
+
+        if forecast_guard and forecast_guard.get("enabled"):
+            if forecast_guard.get("locked"):
+                fg_reason = forecast_guard.get("reason", "ForecastGuard locked")
+                return "WAIT", f"ForecastGuard LOCKED ({fg_reason})", None
         
         if has_traded:
             return 'IDLE', f"Already traded today ({version})", None

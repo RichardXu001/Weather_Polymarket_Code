@@ -10,6 +10,7 @@ from weather_price_monitor import WeatherPriceMonitor
 from engine.config import QuantConfig
 from engine.data_feed import WeatherState
 from engine.strategy import StrategyKernel
+from engine.forecast_guard import ForecastGuardManager
 from executor.poly_trader import PolyExecutor
 from src.monitor.position_manager import PositionManager
 from decimal import Decimal, ROUND_HALF_UP
@@ -29,12 +30,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger("WeatherBot")
 
+# 通知冷却缓存 (market, reason) -> last_send_time
+_NOTIFICATION_COOLDOWN = {}
+
 def send_dingtalk_notification(market, contract, price, shares, reason):
-    """发送钉钉交易机会通知 (增加启动静默期)"""
-    if time.time() - _STARTUP_TIME < 60:
+    """发送钉钉交易机会通知 (增加启动静默期与消息去重)"""
+    now = time.time()
+    if now - _STARTUP_TIME < 60:
         logger.info(f"[钉钉] 启动静默期，忽略通知: {market} {reason}")
         return
-        
+
+    # [NEW] 消息去重 logic: 6小时内相同的市场+理由只发一次 (除非是实际成交)
+    # 成交通知 shares > 0 应当总是允许发送
+    is_trade = shares > 0
+    cache_key = (market, reason)
+    if not is_trade:
+        last_time = _NOTIFICATION_COOLDOWN.get(cache_key, 0)
+        if now - last_time < 21600: # 6 hours
+            logger.info(f"[钉钉] 消息处于冷却期，跳过重复通知: {market} {reason}")
+            return
+    
     webhook = os.getenv("DINGTALK_WEBHOOK")
     if not webhook:
         logger.warning("钉钉 Webhook 未配置，跳过通知")
@@ -42,8 +57,8 @@ def send_dingtalk_notification(market, contract, price, shares, reason):
     
     total_cost = price * shares
     
-    # 消息需要包含关键词 "Polymarket"
-    message = f"""🚨 Polymarket 交易触发提醒
+    # 消息需要包含关键词 "beijixing" 或其他已设定的关键词
+    message = f"""[Beijixing-WeatherBot] 🚨 Polymarket 交易触发提醒
 
 📍 市场: {market}
 🎯 目标合约: {contract}
@@ -53,17 +68,23 @@ def send_dingtalk_notification(market, contract, price, shares, reason):
 📝 触发理由: {reason}
 ⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-请及时关注实盘动态！"""
+请及时关注实盘动态！
+-- [Robot: Weather Bot]"""
     
     payload = {
         "msgtype": "text",
         "text": {"content": message}
     }
     
+    import json
+    logger.info(f"[钉钉推送] Payload: {json.dumps(payload, ensure_ascii=False)}")
+    
     try:
         resp = requests.post(webhook, json=payload, timeout=5)
         if resp.status_code == 200:
             logger.info(f"[钉钉] 通知发送成功")
+            if not is_trade:
+                _NOTIFICATION_COOLDOWN[cache_key] = now
         else:
             logger.warning(f"[钉钉] 通知发送失败: {resp.text}")
     except Exception as e:
@@ -77,6 +98,7 @@ class WeatherBot:
         self.config = QuantConfig
         self.executor = PolyExecutor(self.config)
         self.pos_manager = PositionManager()
+        self.forecast_guard = ForecastGuardManager(self.config)
         
     def _get_local_time_info(self, offset):
         """获取站点本地时间信息: (小时浮点数, HH:MM 字符串)"""
@@ -123,7 +145,17 @@ class WeatherBot:
         
         logger.info(f"[+] Loop Started: {preset_name} | Slug: {slug} | TZ: {tz_offset}")
 
+        # [NEW] 日志节流控制
+        last_status_log_time = 0
+        last_status_summary = ""
+        
         unit = conf.get("unit", "C")
+        
+        # [NEW] 启动时尝试恢复当日历史最高温
+        recovered_max = self._recover_today_max_temp(preset_name, current_date_str)
+        if recovered_max is not None:
+            state.max_temp_overall = recovered_max
+            logger.info(f"[{preset_name:8}] 💾 成功从历史记录恢复当日最高温: {recovered_max:.2f}")
         
         while True:
             try:
@@ -183,24 +215,42 @@ class WeatherBot:
                 
                 if state.om_curr is not None: state.om_history.append(state.om_curr)
                 if state.mn_curr is not None: state.mn_history.append(state.mn_curr)
+                if state.noaa_curr is not None: state.noaa_history.append(state.noaa_curr)
                 
                 v_fit = (state.om_curr * self.config.W1_OM + state.mn_curr * self.config.W2_MN) if (state.om_curr and state.mn_curr) else None
                 if v_fit:
                     state.update_v_fit(v_fit)
                 
-                for hist in [state.om_history, state.mn_history, state.v_fit_history]:
+                for hist in [state.noaa_history, state.om_history, state.mn_history, state.v_fit_history]:
                     if len(hist) > 10: hist.pop(0)
 
                 # 3. 策略决策
                 state.market_prices = prices # 存入全量报价
+
+                guard_state = self.forecast_guard.assess(preset_name, state, conf)
                 
                 # --- 新逻辑：NOAA 下跌触发 / 17点强买 ---
                 signal, reason, target_temp = StrategyKernel.calculate_noaa_drop_signal(
-                    state, self.config, state.max_temp_overall if state.max_temp_overall > -900 else None, state.has_traded_today
+                    state,
+                    self.config,
+                    state.max_temp_overall if state.max_temp_overall > -900 else None,
+                    state.has_traded_today,
+                    forecast_guard=guard_state,
                 )
                 
                 # 兼容原有 v_fit 显示
-                logger.info(f"[{preset_name:8}] NOAA: {state.noaa_curr if state.noaa_curr else 0.0:.1f} | Max: {state.max_temp_overall if state.max_temp_overall > -900 else 0.0:.1f} | Status: {signal:5} | Reason: {reason}")
+                # 3.5 日志节流逻辑 (同一状态 60s 打印一次)
+                guard_tag = "LOCKED" if guard_state.get("locked") else "PASS"
+                status_summary = f"{guard_tag}({guard_state.get('risk_count', 0)}/{guard_state.get('available_sources', 0)}) | {signal:5}"
+                now_ts = time.time()
+                if status_summary != last_status_summary or (now_ts - last_status_log_time) > 60:
+                    logger.info(
+                        f"[{preset_name:8}] NOAA: {state.noaa_curr if state.noaa_curr else 0.0:.1f} | "
+                        f"Max: {state.max_temp_overall if state.max_temp_overall > -900 else 0.0:.1f} | "
+                        f"FG: {status_summary} | Reason: {reason}"
+                    )
+                    last_status_log_time = now_ts
+                    last_status_summary = status_summary
 
                 # 4. 执行决策 (Dry Run 或 Real)
                 if signal in ['BUY_DROP', 'BUY_FORCE']:
@@ -330,7 +380,7 @@ class WeatherBot:
                             is_dry_run=self.config.DRY_RUN
                         )
                 
-                self._record_data(current_recording_file, state, prices, signal, reason)
+                self._record_data(current_recording_file, state, prices, signal, reason, guard_state)
 
             except Exception as e:
                 logger.error(f"[{preset_name}] Loop error: {e}")
@@ -343,6 +393,40 @@ class WeatherBot:
         from datetime import timezone, timedelta
         utc_now = dt.datetime.now(timezone.utc)
         return (utc_now + timedelta(hours=offset)).strftime("%Y-%m-%d")
+
+    def _recover_today_max_temp(self, preset_name, date_str):
+        """扫描当日 CSV 文件恢复最高气温"""
+        import glob
+        # 转换 2026-02-11 为 20260211
+        search_date = date_str.replace("-", "")
+        pattern = f"data/recordings/weather_recording_{preset_name}_{search_date}_*.csv"
+        files = sorted(glob.glob(pattern))
+        
+        if not files:
+            return None
+            
+        max_val = -999.0
+        found = False
+        
+        # 遍历今日所有文件（防止重启多次产生多个文件）
+        for fpath in files:
+            try:
+                with open(fpath, mode='r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        raw_val = row.get('noaa_temp')
+                        if raw_val and raw_val != 'N/A':
+                            try:
+                                val = float(raw_val)
+                                if val > max_val:
+                                    max_val = val
+                                    found = True
+                            except ValueError:
+                                continue
+            except Exception as e:
+                logger.warning(f"[{preset_name:8}] 恢复历史文件失败 {fpath}: {e}")
+                
+        return max_val if found else None
 
     def _record_outcome(self, preset_name, date_str, slug_id, state):
         """结算并记录每日最终结果 (Outcome)"""
@@ -417,11 +501,9 @@ class WeatherBot:
         except Exception as e:
             logger.error(f"[{preset_name:8}] Failed to write trade log: {e}")
 
-    def _record_data(self, filename, state, prices, signal, reason):
+    def _record_data(self, filename, state, prices, signal, reason, guard_state=None):
         """记录实时数据到 CSV (全量原始记录，平铺报价列)"""
-        if prices:
-            logger.info(f"[DEBUG] Recording {len(prices)} price brackets to {filename}")
-        else:
+        if not prices:
             logger.warning(f"[DEBUG] No prices fetched for {filename}")
             
         data_dir = os.path.dirname(filename)
@@ -440,7 +522,16 @@ class WeatherBot:
             'mn_curr': state.mn_curr,
             'mn_fore': state.mn_fore,
             'signal': signal,
-            'reason': reason
+            'reason': reason,
+            'fg_locked': guard_state.get('locked') if guard_state else None,
+            'fg_risk_count': guard_state.get('risk_count') if guard_state else None,
+            'fg_available_sources': guard_state.get('available_sources') if guard_state else None,
+            'fg_reason': guard_state.get('reason') if guard_state else None,
+            'fg_afternoon_peak': guard_state.get('avg_afternoon_peak') if guard_state else None,
+            'fg_night_peak': guard_state.get('avg_night_peak') if guard_state else None,
+            'fg_night_peak_time': guard_state.get('latest_risky_peak_utc').strftime("%H:%M") if (guard_state and guard_state.get('latest_risky_peak_utc')) else None,
+            'fg_max_bias': guard_state.get('max_bias') if guard_state else None,
+            'fg_max_2h_warming': guard_state.get('max_2h_warming') if guard_state else None
         }
         
         # 记录 Yes, No 的 Ask/Bid 和 Volume
@@ -463,7 +554,9 @@ class WeatherBot:
             base_fields = [
                 'timestamp', 'local_time', 'local_hour', 
                 'noaa_curr', 'om_curr', 'om_fore', 'mn_curr', 'mn_fore',
-                'signal', 'reason'
+                'signal', 'reason',
+                'fg_locked', 'fg_risk_count', 'fg_available_sources', 'fg_reason',
+                'fg_afternoon_peak', 'fg_night_peak', 'fg_night_peak_time', 'fg_max_bias', 'fg_max_2h_warming'
             ]
             
             # 如果是新文件，只有在拿到报价后才创建并写入 header
@@ -506,14 +599,13 @@ class WeatherBot:
         await asyncio.gather(*tasks)
 
     async def monitor_and_report_loop(self, presets, report_interval_hours=4):
-        """每隔 4 小时更新一次状态并发送钉钉汇总报告"""
+        """每隔 4 小时更新一次状态并发送钉钉汇总报告 (启动时立即推送一次)"""
         logger.info(f"[*] Postion Monitor Loop Started (Interval: {report_interval_hours}h)")
         
         while True:
-            # 首先等待间隔时间，避免启动时立即推送
-            await asyncio.sleep(report_interval_hours * 3600)
             try:
                 # 1. 更新所有地点的持仓状态
+                logger.info("[监控] 正在更新所有地点的持仓状态并准备报告...")
                 for p in presets:
                     self.pos_manager.update_positions_status(p)
                 
@@ -523,19 +615,32 @@ class WeatherBot:
                 webhook = os.getenv("DINGTALK_WEBHOOK")
                 if webhook:
                     payload = {
-                        "msgtype": "markdown",
-                        "markdown": {
-                            "title": "Polymarket 持仓报告",
-                            "text": report_text
+                        "msgtype": "text",
+                        "text": {
+                            "content": f"[Beijixing-WeatherBot] 📊 定期持仓汇总报告\n\n**当前持仓状态**\n{report_text}\n\n-- [Robot: Weather Bot]"
                         }
                     }
-                    requests.post(webhook, json=payload, timeout=10)
-                    logger.info("[监控] 已发送每 4 小时持仓汇总报告")
+                    import json
+                    logger.info(f"[监控推送] Payload: {json.dumps(payload, ensure_ascii=False)}")
+                    # 使用 run_in_executor 避免同步请求阻塞异步循环
+                    def _send():
+                        try:
+                            # 增加对响应的深度校验
+                            r = requests.post(webhook, json=payload, timeout=15)
+                            logger.info(f"[监控] 钉钉响应: {r.status_code} - {r.text}")
+                        except Exception as e:
+                            logger.error(f"[监控] 发送请求异常: {e}")
+
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, _send)
                 else:
                     logger.warning("[监控] 钉钉 Webhook 未配置，无法发送汇总报告")
 
             except Exception as e:
                 logger.error(f"[监控] 报告循环异常: {e}")
+            
+            # 最后等待间隔时间
+            await asyncio.sleep(report_interval_hours * 3600)
 
 
 if __name__ == "__main__":
@@ -555,7 +660,19 @@ if __name__ == "__main__":
         help="采样主循环间隔(秒)，默认 30s"
     )
     
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--dry-run', action='store_true', help='强制开启 Dry Run 模拟模式 (覆盖 .env)')
+    group.add_argument('--real', action='store_true', help='强制开启实盘模式 (覆盖 .env)')
+    
     args = parser.parse_args()
+    
+    # 模式开关：优先级 CLI > .env
+    if args.dry_run:
+        QuantConfig.DRY_RUN = True
+        logger.info("[CLI] 模式强制切换为: DRY RUN")
+    elif args.real:
+        QuantConfig.DRY_RUN = False
+        logger.info("[CLI] 模式强制切换为: REAL (请注意风险!)")
     
     # 获取运行城市：优先级 CLI > .env > Default
     active_cities = args.presets or QuantConfig.ACTIVE_LOCATIONS
