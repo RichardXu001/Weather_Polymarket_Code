@@ -12,6 +12,7 @@ from engine.data_feed import WeatherState
 from engine.strategy import StrategyKernel
 from executor.poly_trader import PolyExecutor
 from src.monitor.position_manager import PositionManager
+from decimal import Decimal, ROUND_HALF_UP
 
 # 加载环境变量
 load_dotenv()
@@ -208,7 +209,9 @@ class WeatherBot:
                     display_temp = target_temp
                     symbol = "°C"
                     if unit == "F" and target_temp is not None:
-                        display_temp = round(target_temp * 1.8 + 32)
+                        # NWS standard: Round Half Up (Asymmetric)
+                        f_temp = target_temp * 1.8 + 32
+                        display_temp = int(Decimal(str(f_temp)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
                         symbol = "°F"
                     
                     target_contract_prefix = f"{int(display_temp)}{symbol}"
