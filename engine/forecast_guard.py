@@ -91,7 +91,8 @@ class ForecastGuardManager:
 
         available = int(report.get("available_sources", 0))
         risk_count = int(report.get("risk_count", 0))
-        threshold = max(1, int(self.config.FORECAST_GUARD_RISK_SOURCE_THRESHOLD))
+        # 多源投票保护：至少 2 个风险源才允许进入锁仓，避免单源误报直接锁死。
+        threshold = max(2, int(self.config.FORECAST_GUARD_RISK_SOURCE_THRESHOLD))
         no_data_lock = available == 0 and bool(self.config.FORECAST_GUARD_FAIL_SAFE)
 
         if risk_count >= threshold or no_data_lock:
@@ -210,23 +211,28 @@ class ForecastGuardManager:
             afternoon_forecast_max = max(afternoon_forecast_pts) if afternoon_forecast_pts else -999.0
             day_ref_max = max(afternoon_forecast_max, day_max_so_far)
 
-            # 2. 识别未来的风险波峰 (当天 17:00 后的波峰)
+            # 2. 识别夜间局部峰值 (用于观测/兼容字段)
             night_peaks = [p for p in peaks if p["local_hour"] >= 17]
-            
-            # 3. 核心判定：统一拦截阈值 (1.5C)
-            rebound_threshold = self.config.FORECAST_GUARD_PEAK_THRESHOLD_C
-            
-            c_night_peak = False
+
+            # 3. 核心判定：夜间峰值必须同时满足
+            # - 落在风险线以上: T >= (day_ref_max - threshold)
+            # - 持续点数 >= min_points
+            # - 相对前后点显著性 >= prominence
+            valid_night_peak = self._find_valid_night_risk_peak(corrected, tz_offset, day_ref_max)
+
+            c_night_peak = valid_night_peak is not None
             risk_desc = "OK"
             night_peak_dt = None
-            
-            for np in night_peaks:
-                # 核心拦截逻辑：晚上峰值距离日间基准不足 [1.5C] 或 已经反超
-                if np["temp"] >= (day_ref_max - rebound_threshold):
-                    c_night_peak = True
-                    night_peak_dt = np["time"]
-                    risk_desc = f"夜间峰值风险[{np['local_hour']:.1f}h/{np['temp']:.1f}C]"
-                    break
+            night_peak_temp = None
+            if valid_night_peak is not None:
+                night_peak_dt = valid_night_peak["time"]
+                night_peak_temp = valid_night_peak["temp"]
+                risk_desc = (
+                    "夜间峰值风险"
+                    f"[{valid_night_peak['local_hour']:.1f}h/{valid_night_peak['temp']:.1f}C,"
+                    f"dur={valid_night_peak['duration_points']}pts,"
+                    f"prom={valid_night_peak['prominence_c']:.2f}C]"
+                )
 
             risky = c_night_peak
             if risky:
@@ -250,8 +256,18 @@ class ForecastGuardManager:
                 "bias_c": round(bias, 3),
                 "future_max_c": round(future_max, 3),
                 "afternoon_peak_c": round(day_ref_max, 3) if day_ref_max > -900 else None,
-                "night_peak_c": round(night_peaks[0]["temp"], 3) if night_peaks else None,
+                "night_peak_c": (
+                    round(night_peak_temp, 3)
+                    if night_peak_temp is not None
+                    else (round(night_peaks[0]["temp"], 3) if night_peaks else None)
+                ),
                 "night_peak_time_utc": night_peak_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if night_peak_dt else None,
+                "night_peak_duration_pts": (
+                    int(valid_night_peak["duration_points"]) if valid_night_peak is not None else 0
+                ),
+                "night_peak_prominence_c": (
+                    round(valid_night_peak["prominence_c"], 3) if valid_night_peak is not None else None
+                ),
                 "c_night_peak": c_night_peak,
                 "risky": risky,
                 "risk_desc": risk_desc
@@ -369,6 +385,74 @@ class ForecastGuardManager:
             return None
         best = min(points, key=lambda x: abs((x[0] - ref_dt).total_seconds()))
         return best[1]
+
+    def _find_valid_night_risk_peak(
+        self,
+        series: List[Tuple[datetime, float]],
+        tz_offset: float,
+        day_ref_max: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Find a night risk peak with persistence + local-prominence filters."""
+        rebound_threshold = float(self.config.FORECAST_GUARD_PEAK_THRESHOLD_C)
+        min_points = max(1, int(self.config.FORECAST_GUARD_PEAK_MIN_POINTS))
+        min_prominence = max(0.0, float(self.config.FORECAST_GUARD_PEAK_PROMINENCE_C))
+        risk_line = day_ref_max - rebound_threshold
+
+        day_points: List[Tuple[datetime, float, float]] = []
+        for dt_utc, temp in series:
+            local_hour = self._local_hour(dt_utc, tz_offset)
+            if 12 <= local_hour < 24:
+                day_points.append((dt_utc, temp, local_hour))
+
+        if len(day_points) < 3:
+            return None
+
+        for i in range(1, len(day_points) - 1):
+            curr_dt, curr_temp, curr_hour = day_points[i]
+            if curr_hour < 17 or curr_temp < risk_line:
+                continue
+
+            prev_temp = day_points[i - 1][1]
+            next_temp = day_points[i + 1][1]
+
+            # Local peak shape.
+            if not (curr_temp > prev_temp and curr_temp >= next_temp):
+                continue
+
+            prominence = curr_temp - max(prev_temp, next_temp)
+            if prominence + 1e-9 < min_prominence:
+                continue
+
+            # Persistence: count contiguous night points above risk line around this peak.
+            left = i
+            while (
+                left - 1 >= 0
+                and day_points[left - 1][2] >= 17
+                and day_points[left - 1][1] >= risk_line
+            ):
+                left -= 1
+            right = i
+            while (
+                right + 1 < len(day_points)
+                and day_points[right + 1][2] >= 17
+                and day_points[right + 1][1] >= risk_line
+            ):
+                right += 1
+
+            duration = right - left + 1
+            if duration < min_points:
+                continue
+
+            return {
+                "time": curr_dt,
+                "local_hour": curr_hour,
+                "temp": curr_temp,
+                "duration_points": duration,
+                "prominence_c": prominence,
+                "risk_line_c": risk_line,
+            }
+
+        return None
 
     def _extract_peaks(self, series: List[Tuple[datetime, float]], tz_offset: float) -> List[Dict[str, Any]]:
         """从预报序列中提取 12:00-24:00 的局部极值点 (波峰)"""

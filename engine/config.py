@@ -35,6 +35,15 @@ class QuantConfig:
     PEAK_TRIGGER_START = float(os.getenv("STRATEGY_PEAK_TRIGGER_START", 14.0)) # 14点开始监控下跌
     FORCE_BUY_TIME = float(os.getenv("STRATEGY_FORCE_BUY_TIME", 17.0))     # 17点强制买入
     TRADE_SHARES = float(os.getenv("STRATEGY_TRADE_SHARES", 5.0))         # 买入份额
+    # 下单价格保护（统一阈值）：dry run / real 都要求 ask >= 0.9（默认）
+    _MIN_YES_ASK_LEGACY_REAL = os.getenv("STRATEGY_MIN_YES_ASK_REAL")
+    _MIN_YES_ASK_LEGACY_DRY = os.getenv("STRATEGY_MIN_YES_ASK_DRY_RUN")
+    MIN_YES_ASK = float(
+        os.getenv(
+            "STRATEGY_MIN_YES_ASK",
+            _MIN_YES_ASK_LEGACY_REAL or _MIN_YES_ASK_LEGACY_DRY or "0.9",
+        )
+    )
     MIN_DROP_DURATION = int(os.getenv("STRATEGY_MIN_DROP_DURATION", 3))   # 连续下跌采样门槛
     
     # 5. 反弹保护
@@ -99,7 +108,7 @@ class QuantConfig:
     FORECAST_GUARD_ENABLED = os.getenv("FORECAST_GUARD_ENABLED", "true").lower() == "true"
     FORECAST_GUARD_FAIL_SAFE = os.getenv("FORECAST_GUARD_FAIL_SAFE", "true").lower() == "true"
     FORECAST_GUARD_RECALC_INTERVAL_SECONDS = int(os.getenv("FORECAST_GUARD_RECALC_INTERVAL_SECONDS", 1800))
-    FORECAST_GUARD_RISK_SOURCE_THRESHOLD = int(os.getenv("FORECAST_GUARD_RISK_SOURCE_THRESHOLD", 1))
+    FORECAST_GUARD_RISK_SOURCE_THRESHOLD = int(os.getenv("FORECAST_GUARD_RISK_SOURCE_THRESHOLD", 2))
 
     # Risk conditions
     FORECAST_GUARD_NEAR_DELTA_C = float(os.getenv("FORECAST_GUARD_NEAR_DELTA_C", 1.5))
@@ -115,6 +124,7 @@ class QuantConfig:
     )
     # [NEW] 极值时间感知策略相关
     FORECAST_GUARD_PEAK_THRESHOLD_C = float(os.getenv("FORECAST_GUARD_PEAK_THRESHOLD_C", 1.5))
+    FORECAST_GUARD_PEAK_MIN_POINTS = int(os.getenv("FORECAST_GUARD_PEAK_MIN_POINTS", 2))
     FORECAST_GUARD_PEAK_PROMINENCE_C = float(os.getenv("FORECAST_GUARD_PEAK_PROMINENCE_C", 0.3))
 
     # Met Office site-specific (global point hourly API)

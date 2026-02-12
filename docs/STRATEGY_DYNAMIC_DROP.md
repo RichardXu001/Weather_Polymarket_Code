@@ -49,7 +49,7 @@
 ## 6. 强制执行与防御
 
 - **17:00 强制买入 (`BUY_FORCE`)**: 若整日均未触发下跌信号，则在 17:00 准点切入。
-- **全线价格保护**: 无论何种信号，若目标合约价格（Yes Ask） **≤ 0.5 USDC**，则放弃交易并标记为 `SKIP_PRICE`。
+- **全线价格保护（可配置）**: 无论何种信号，若目标合约价格（Yes Ask） **< 0.9 USDC**（默认）则放弃交易并标记为 `SKIP_PRICE`。
 - **独立审计存证**: 每一笔信号及其决策逻辑（Res/Dur/Depth）均持久化至 `data/trades/`。
 
 ### 6.1 Forecast Guard V2（30 分钟重算 + 风险锁）
@@ -176,7 +176,7 @@ KMA_NY_SEOUL=
 FORECAST_GUARD_ENABLED=true
 FORECAST_GUARD_FAIL_SAFE=true
 FORECAST_GUARD_RECALC_INTERVAL_SECONDS=1800
-FORECAST_GUARD_RISK_SOURCE_THRESHOLD=1
+FORECAST_GUARD_RISK_SOURCE_THRESHOLD=2
 FORECAST_GUARD_NEAR_DELTA_C=1.5
 FORECAST_GUARD_NEW_HIGH_DELTA_C=0.5
 FORECAST_GUARD_REBOUND_DELTA_3H_C=0.8
