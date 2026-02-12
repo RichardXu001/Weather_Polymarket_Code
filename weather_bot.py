@@ -5,6 +5,7 @@ import csv
 import os
 import requests
 from datetime import datetime
+from datetime import datetime as dt_datetime
 from dotenv import load_dotenv
 from weather_price_monitor import WeatherPriceMonitor
 from engine.config import QuantConfig
@@ -29,6 +30,21 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("WeatherBot")
+
+_MONTH_NAME_TO_NUM = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
 
 # 通知冷却缓存 (market, reason) -> last_send_time
 _NOTIFICATION_COOLDOWN = {}
@@ -89,6 +105,56 @@ def send_dingtalk_notification(market, contract, price, shares, reason):
             logger.warning(f"[钉钉] 通知发送失败: {resp.text}")
     except Exception as e:
         logger.error(f"[钉钉] 通知发送异常: {e}")
+
+
+def send_fg_lock_dingtalk_notification(market, fg_reason, risk_count, available_sources, risky_sources):
+    """发送 ForecastGuard 锁仓通知（仅在锁仓事件触发时调用）"""
+    now = time.time()
+    if now - _STARTUP_TIME < 60:
+        logger.info(f"[钉钉] 启动静默期，忽略 FG 锁仓通知: {market}")
+        return
+
+    reason_text = fg_reason or "ForecastGuard locked"
+    cache_key = (market, "FG_LOCK", reason_text)
+    last_time = _NOTIFICATION_COOLDOWN.get(cache_key, 0)
+    if now - last_time < 21600:  # 6 hours
+        logger.info(f"[钉钉] FG 锁仓通知处于冷却期，跳过: {market} {reason_text}")
+        return
+
+    webhook = os.getenv("DINGTALK_WEBHOOK")
+    if not webhook:
+        logger.warning("钉钉 Webhook 未配置，跳过 FG 锁仓通知")
+        return
+
+    risky_text = ", ".join(risky_sources) if risky_sources else "N/A"
+    message = f"""[Beijixing-WeatherBot] ⚠️ ForecastGuard 锁仓通知
+
+📍 市场: {market}
+🔒 状态: FG_LOCKED
+📊 风险源: {risk_count}/{available_sources}
+🧩 风险来源: {risky_text}
+📝 原因: {reason_text}
+⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+-- [Robot: Weather Bot]"""
+
+    payload = {
+        "msgtype": "text",
+        "text": {"content": message}
+    }
+
+    import json
+    logger.info(f"[FG钉钉推送] Payload: {json.dumps(payload, ensure_ascii=False)}")
+
+    try:
+        resp = requests.post(webhook, json=payload, timeout=5)
+        if resp.status_code == 200:
+            _NOTIFICATION_COOLDOWN[cache_key] = now
+            logger.info(f"[钉钉] FG 锁仓通知发送成功")
+        else:
+            logger.warning(f"[钉钉] FG 锁仓通知发送失败: {resp.text}")
+    except Exception as e:
+        logger.error(f"[钉钉] FG 锁仓通知发送异常: {e}")
 
 
 class WeatherBot:
@@ -156,12 +222,33 @@ class WeatherBot:
         if recovered_max is not None:
             state.max_temp_overall = recovered_max
             logger.info(f"[{preset_name:8}] 💾 成功从历史记录恢复当日最高温: {recovered_max:.2f}")
+
+        # [NEW] 启动时尝试恢复当日交易状态 (防止重启后重复下单)
+        if self._recover_today_trade_status(preset_name, current_date_str, tz_offset):
+            state.has_traded_today = True
+            logger.info(f"[{preset_name:8}] 🔒 成功从历史记录恢复已交易状态 (Has Traded Today)")
+
+        # FG 锁仓状态机：仅在锁仓状态切换时发通知，避免循环内重复推送
+        prev_fg_locked = False
+        prev_fg_reason = ""
         
         while True:
             try:
                 # 检查日期，如果跨天则刷新 slug
                 now_date_str = self._get_local_date(tz_offset)
                 if now_date_str != current_date_str:
+                    # 跨天前将上一交易日 outcome 标记为最终结算
+                    if state.max_temp_overall > -900:
+                        self._upsert_outcome_row(
+                            preset_name=preset_name,
+                            date_str=current_date_str,
+                            slug_id=slug,
+                            noaa_max=state.max_temp_overall,
+                            is_final=True,
+                        )
+                        logger.info(
+                            f"[{preset_name:8}] 🧾 Outcome finalized for {current_date_str} | Max(NOAA): {state.max_temp_overall:.2f}"
+                        )
                     logger.info(f"[{preset_name:8}] Date changed ({current_date_str} -> {now_date_str}), refreshing slug...")
                     current_date_str = now_date_str
                     slug = self._get_dynamic_slug(conf['slug_template'], tz_offset)
@@ -176,6 +263,11 @@ class WeatherBot:
                     state.max_temp_overall = -999.0
                     state.v_fit_history = []
                     logger.info(f"[{preset_name:8}] New Session: {slug} | File: {current_recording_file}")
+
+                    # [NEW] 跨天后再次检查当日交易状态 (防止跨天重启边缘case)
+                    if self._recover_today_trade_status(preset_name, current_date_str, tz_offset):
+                        state.has_traded_today = True
+                        logger.info(f"[{preset_name:8}] 🔒 跨天检测到今日已有交易记录 (Has Traded Today)")
 
                 # 1. 获取本地时间与数据 (注入差异化采样间隔)
                 state.local_hour, state.local_time = self._get_local_time_info(tz_offset)
@@ -200,7 +292,17 @@ class WeatherBot:
                 state.consensus_fore = wd['avg_fore']
                 
                 if state.noaa_curr is not None:
+                    prev_noaa_max = state.max_temp_overall
                     state.max_temp_overall = max(state.max_temp_overall, state.noaa_curr)
+                    if state.max_temp_overall > (prev_noaa_max + 1e-9):
+                        # 盘中实时账本：当天出现新高时 upsert 同一天记录
+                        self._upsert_outcome_row(
+                            preset_name=preset_name,
+                            date_str=current_date_str,
+                            slug_id=slug,
+                            noaa_max=state.max_temp_overall,
+                            is_final=False,
+                        )
                 if state.om_curr is not None:
                     state.max_temp_om = max(state.max_temp_om, state.om_curr)
                 if state.mn_curr is not None:
@@ -228,6 +330,26 @@ class WeatherBot:
                 state.market_prices = prices # 存入全量报价
 
                 guard_state = self.forecast_guard.assess(preset_name, state, conf)
+
+                fg_locked_now = bool(guard_state.get("locked"))
+                fg_reason_now = guard_state.get("reason", "")
+                if fg_locked_now and (not prev_fg_locked or fg_reason_now != prev_fg_reason):
+                    src_reports = guard_state.get("sources", {}) if isinstance(guard_state.get("sources"), dict) else {}
+                    risky_sources = sorted(
+                        [
+                            name for name, rep in src_reports.items()
+                            if isinstance(rep, dict) and rep.get("risky")
+                        ]
+                    )
+                    send_fg_lock_dingtalk_notification(
+                        market=preset_name.upper(),
+                        fg_reason=fg_reason_now,
+                        risk_count=int(guard_state.get("risk_count", 0)),
+                        available_sources=int(guard_state.get("available_sources", 0)),
+                        risky_sources=risky_sources
+                    )
+                prev_fg_locked = fg_locked_now
+                prev_fg_reason = fg_reason_now
                 
                 # --- 新逻辑：NOAA 下跌触发 / 17点强买 ---
                 signal, reason, target_temp = StrategyKernel.calculate_noaa_drop_signal(
@@ -306,15 +428,15 @@ class WeatherBot:
                         if p_data:
                             contract_price = p_data.get('yes_ask') if isinstance(p_data, dict) else p_data
                     
-                    # [Rule] 通用价格滤网：无论何种触发模式，价格必须 > 0.5
-                    # 这是为了防止在极端概率下（如气温虽然跌了但仍有变数）买入垃圾合约
+                    # [Rule] 价格保护：dry run / real 统一要求 ask >= MIN_YES_ASK
                     should_execute = True
                     price_val = float(contract_price) if contract_price else 0.0
+                    min_yes_ask = float(self.config.MIN_YES_ASK)
                     
-                    if price_val <= 0.5:
+                    if price_val + 1e-9 < min_yes_ask:
                         should_execute = False
                         reason_prefix = "Force buy" if signal == 'BUY_FORCE' else "Drop buy"
-                        reason = f"{reason_prefix} skipped: Price {price_val} <= 0.5"
+                        reason = f"{reason_prefix} skipped: Price {price_val:.3f} < MinAsk {min_yes_ask:.3f}"
                         logger.info(f"[{preset_name:8}] {reason} (Contract: {target_contract})")
                         
                         # 发送跳过通知
@@ -395,7 +517,11 @@ class WeatherBot:
         return (utc_now + timedelta(hours=offset)).strftime("%Y-%m-%d")
 
     def _recover_today_max_temp(self, preset_name, date_str):
-        """扫描当日 CSV 文件恢复最高气温"""
+        """恢复当日最高温：优先 outcome 账本，失败后回退扫描 recording"""
+        outcome_max = self._recover_today_max_from_outcome(preset_name, date_str)
+        if outcome_max is not None:
+            return outcome_max
+
         import glob
         # 转换 2026-02-11 为 20260211
         search_date = date_str.replace("-", "")
@@ -414,7 +540,10 @@ class WeatherBot:
                 with open(fpath, mode='r', encoding='utf-8') as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        raw_val = row.get('noaa_temp')
+                        raw_val = row.get('noaa_curr')
+                        if not raw_val or raw_val == 'N/A':
+                            # 兼容旧字段名
+                            raw_val = row.get('noaa_temp')
                         if raw_val and raw_val != 'N/A':
                             try:
                                 val = float(raw_val)
@@ -425,34 +554,237 @@ class WeatherBot:
                                 continue
             except Exception as e:
                 logger.warning(f"[{preset_name:8}] 恢复历史文件失败 {fpath}: {e}")
-                
+
         return max_val if found else None
+
+    def _recover_today_max_from_outcome(self, preset_name, date_str):
+        """从 outcome 账本恢复当日最高温 (is_final TRUE/FALSE 均可)"""
+        filename = self._get_outcome_filename(preset_name)
+        if not os.path.exists(filename):
+            return None
+
+        max_val = -999.0
+        found = False
+        try:
+            with open(filename, mode='r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if str(row.get('date', '')).strip() != date_str:
+                        continue
+                    val = self._safe_float(row.get('noaa_max'))
+                    if val is None:
+                        continue
+                    if val > max_val:
+                        max_val = val
+                        found = True
+        except Exception as e:
+            logger.warning(f"[{preset_name:8}] 读取 outcome 恢复失败 {filename}: {e}")
+
+        return max_val if found else None
+
+    def _recover_today_trade_status(self, city_name, date_str, tz_offset):
+        """检查今日交易记录文件，判断是否已完成交易 (防止重启后重复下单)"""
+        # Dry run 不进行真实交易状态恢复，避免测试数据影响逻辑。
+        if self.config.DRY_RUN:
+            return False
+
+        # 交易记录文件: data/trades/trade_history_{city}.csv
+        filename = f"data/trades/trade_history_{city_name}.csv"
+        if not os.path.exists(filename):
+            return False
+            
+        target_day = None
+        try:
+            target_day = dt_datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return False
+
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if str(row.get('is_dry_run', 'FALSE')).upper() == 'TRUE':
+                        continue
+                    try:
+                        shares = float(row.get('shares', 0) or 0)
+                    except ValueError:
+                        shares = 0.0
+                    if shares <= 0:
+                        continue
+
+                    status = str(row.get('status', '')).upper()
+                    signal_type = str(row.get('signal_type', '')).upper()
+                    is_trade_row = (status in {'PENDING', 'FILLED', 'WIN', 'LOSS', 'REDEEMED'}) or signal_type.startswith('BUY')
+                    if not is_trade_row:
+                        continue
+
+                    slug = row.get('contract_slug', '')
+                    if self._slug_matches_local_date(slug, target_day):
+                        return True
+        except Exception as e:
+            logger.error(f"Error checking trade history for {city_name}: {e}")
+            
+        return False
+
+    @staticmethod
+    def _slug_matches_local_date(slug: str, target_day) -> bool:
+        # slug 形如: highest-temperature-in-seoul-on-february-12-2026
+        if not slug:
+            return False
+        m = re.search(r'on-([a-z]+)-(\d{1,2})-(\d{4})$', slug.lower())
+        if not m:
+            return False
+        month_name, day_str, year_str = m.group(1), m.group(2), m.group(3)
+        month = _MONTH_NAME_TO_NUM.get(month_name)
+        if month is None:
+            return False
+        try:
+            slug_day = dt_datetime(int(year_str), month, int(day_str)).date()
+        except ValueError:
+            return False
+        return slug_day == target_day
 
     def _record_outcome(self, preset_name, date_str, slug_id, state):
         """结算并记录每日最终结果 (Outcome)"""
-        data_dir = "data/outcomes"
-        os.makedirs(data_dir, exist_ok=True)
-        filename = f"{data_dir}/outcome_{preset_name}.csv"
-        
-        file_exists = os.path.isfile(filename)
-        with open(filename, 'a', newline='') as f:
-            fieldnames = ['date', 'slug_id', 'noaa_max']
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not file_exists:
-                writer.writeheader()
-            
-            # 记录最高温
-            actual_max = f"{state.max_temp_overall:.2f}" if state.max_temp_overall > -900 else "N/A"
-            
-            writer.writerow({
-                'date': date_str,
-                'slug_id': slug_id,
-                'noaa_max': actual_max
-            })
-            logger.info(f"[✓] Daily Summary Saved for {preset_name} | Max(NOAA): {actual_max}")
-            
+        if state.max_temp_overall <= -900:
+            return
+        self._upsert_outcome_row(
+            preset_name=preset_name,
+            date_str=date_str,
+            slug_id=slug_id,
+            noaa_max=state.max_temp_overall,
+            is_final=True,
+        )
+        logger.info(f"[✓] Daily Summary Saved for {preset_name} | Max(NOAA): {state.max_temp_overall:.2f}")
         # 重置最高温以便第二天重新开始
         state.max_temp_overall = -999.0
+
+    @staticmethod
+    def _safe_float(raw_val):
+        if raw_val is None:
+            return None
+        txt = str(raw_val).strip()
+        if not txt or txt.upper() == "N/A":
+            return None
+        try:
+            return float(txt)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_bool_str(raw_val) -> bool:
+        if raw_val is None:
+            return False
+        return str(raw_val).strip().upper() in {"1", "TRUE", "YES", "Y"}
+
+    @staticmethod
+    def _format_noaa_max(noaa_max):
+        if noaa_max is None:
+            return ""
+        return f"{float(noaa_max):.2f}"
+
+    @staticmethod
+    def _outcome_fieldnames():
+        # 保持与历史文件兼容：旧列继续保留，新增 is_final
+        return ["date", "slug_id", "target_threshold", "noaa_max", "result", "is_final"]
+
+    def _get_outcome_filename(self, preset_name):
+        data_dir = "data/outcomes"
+        os.makedirs(data_dir, exist_ok=True)
+        return f"{data_dir}/outcome_{preset_name}.csv"
+
+    def _atomic_write_csv(self, filename, fieldnames, rows):
+        tmp_filename = f"{filename}.tmp.{os.getpid()}"
+        try:
+            with open(tmp_filename, "w", newline="", encoding="utf-8") as fw:
+                writer = csv.DictWriter(fw, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({k: row.get(k, "") for k in fieldnames})
+            os.replace(tmp_filename, filename)
+        finally:
+            if os.path.exists(tmp_filename):
+                try:
+                    os.remove(tmp_filename)
+                except OSError:
+                    pass
+
+    def _upsert_outcome_row(self, preset_name, date_str, slug_id, noaa_max, is_final=False, target_threshold="", result=""):
+        """按 date 对 outcome 文件执行原子 upsert，避免同一天重复追加多行。"""
+        filename = self._get_outcome_filename(preset_name)
+        fieldnames = self._outcome_fieldnames()
+
+        def _normalize_row(row):
+            normalized = {k: str(row.get(k, "")).strip() for k in fieldnames}
+            if self._parse_bool_str(normalized.get("is_final")):
+                normalized["is_final"] = "TRUE"
+            else:
+                normalized["is_final"] = "FALSE"
+            return normalized
+
+        rows_by_date = {}
+        ordered_dates = []
+        if os.path.exists(filename):
+            try:
+                with open(filename, mode="r", encoding="utf-8") as fr:
+                    reader = csv.DictReader(fr)
+                    for raw_row in reader:
+                        date_key = str(raw_row.get("date", "")).strip()
+                        if not date_key:
+                            continue
+                        row = _normalize_row(raw_row)
+                        prev = rows_by_date.get(date_key)
+                        if prev is None:
+                            rows_by_date[date_key] = row
+                            ordered_dates.append(date_key)
+                        else:
+                            prev_max = self._safe_float(prev.get("noaa_max"))
+                            new_max = self._safe_float(row.get("noaa_max"))
+                            if new_max is not None and (prev_max is None or new_max > prev_max):
+                                prev["noaa_max"] = self._format_noaa_max(new_max)
+                            if row.get("slug_id"):
+                                prev["slug_id"] = row["slug_id"]
+                            if row.get("target_threshold"):
+                                prev["target_threshold"] = row["target_threshold"]
+                            if row.get("result"):
+                                prev["result"] = row["result"]
+                            prev["is_final"] = "TRUE" if (
+                                self._parse_bool_str(prev.get("is_final")) or self._parse_bool_str(row.get("is_final"))
+                            ) else "FALSE"
+            except Exception as e:
+                logger.warning(f"[{preset_name:8}] 读取 outcome 文件失败，改为重建 {filename}: {e}")
+                rows_by_date = {}
+                ordered_dates = []
+
+        incoming = {
+            "date": date_str,
+            "slug_id": slug_id or "",
+            "target_threshold": target_threshold or "",
+            "noaa_max": self._format_noaa_max(noaa_max if (noaa_max is not None and noaa_max > -900) else None),
+            "result": result or "",
+            "is_final": "TRUE" if is_final else "FALSE",
+        }
+        prev = rows_by_date.get(date_str)
+        if prev is None:
+            rows_by_date[date_str] = incoming
+            ordered_dates.append(date_str)
+        else:
+            prev_max = self._safe_float(prev.get("noaa_max"))
+            incoming_max = self._safe_float(incoming.get("noaa_max"))
+            if incoming_max is not None and (prev_max is None or incoming_max > prev_max):
+                prev["noaa_max"] = self._format_noaa_max(incoming_max)
+            if incoming.get("slug_id"):
+                prev["slug_id"] = incoming["slug_id"]
+            if incoming.get("target_threshold"):
+                prev["target_threshold"] = incoming["target_threshold"]
+            if incoming.get("result"):
+                prev["result"] = incoming["result"]
+            prev["is_final"] = "TRUE" if (
+                self._parse_bool_str(prev.get("is_final")) or self._parse_bool_str(incoming.get("is_final"))
+            ) else "FALSE"
+
+        ordered_rows = [rows_by_date[d] for d in ordered_dates if d in rows_by_date]
+        self._atomic_write_csv(filename, fieldnames, ordered_rows)
 
     def _get_dynamic_slug(self, template, offset):
         """根据站点本地时间动态生成 Slug"""
@@ -475,7 +807,8 @@ class WeatherBot:
         """记录具体的交易触发信号到独立文件 (data/trades/)"""
         data_dir = "data/trades"
         os.makedirs(data_dir, exist_ok=True)
-        filename = f"{data_dir}/trade_history_{city_name}.csv"
+        # 与持仓生命周期文件解耦，避免不同 schema 污染 trade_history。
+        filename = f"{data_dir}/trade_events_{city_name}.csv"
         
         file_exists = os.path.isfile(filename)
         row = {
@@ -617,7 +950,7 @@ class WeatherBot:
                     payload = {
                         "msgtype": "text",
                         "text": {
-                            "content": f"[Beijixing-WeatherBot] 📊 定期持仓汇总报告\n\n**当前持仓状态**\n{report_text}\n\n-- [Robot: Weather Bot]"
+                            "content": f"[Beijixing-WeatherBot] 📊 定期持仓汇总报告\n\n当前持仓状态\n{report_text}\n\n-- [Robot: Weather Bot]"
                         }
                     }
                     import json
