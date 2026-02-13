@@ -214,32 +214,37 @@ class ForecastGuardManager:
             # 2. 识别夜间局部峰值 (用于观测/兼容字段)
             night_peaks = [p for p in peaks if p["local_hour"] >= 17]
 
-            # 3. 核心判定：夜间峰值必须同时满足
-            # - 落在风险线以上: T >= (day_ref_max - threshold)
+            # 3. 核心判定：夜间风险区间窗口必须同时满足
+            # - 17:00 后 T >= (day_ref_max - threshold) 的连续区间
             # - 持续点数 >= min_points
-            # - 相对前后点显著性 >= prominence
-            valid_night_peak = self._find_valid_night_risk_peak(corrected, tz_offset, day_ref_max)
+            # - 峰值显著性 >= prominence (采用区间内峰值/区间边界 proxy 的最大值)
+            risk_window = self._find_valid_night_risk_window(corrected, tz_offset, day_ref_max)
 
-            c_night_peak = valid_night_peak is not None
+            c_night_peak = risk_window is not None
             risk_desc = "OK"
-            night_peak_dt = None
+            night_peak_dt = None  # 用于展示 (max@time)
+            night_peak_anchor_dt = None  # 用于锁仓时间锚点 (window end)
             night_peak_temp = None
-            if valid_night_peak is not None:
-                night_peak_dt = valid_night_peak["time"]
-                night_peak_temp = valid_night_peak["temp"]
+            if risk_window is not None:
+                night_peak_dt = risk_window["max_time"]
+                night_peak_anchor_dt = risk_window["end_time"]
+                night_peak_temp = risk_window["max_temp"]
                 risk_desc = (
-                    "夜间峰值风险"
-                    f"[{valid_night_peak['local_hour']:.1f}h/{valid_night_peak['temp']:.1f}C,"
-                    f"dur={valid_night_peak['duration_points']}pts,"
-                    f"prom={valid_night_peak['prominence_c']:.2f}C]"
+                    "夜间风险区间"
+                    f"[{risk_window['start_local_hour']:.1f}-{risk_window['end_local_hour']:.1f}h,"
+                    f"max={risk_window['max_temp']:.1f}C@{risk_window['max_local_hour']:.1f}h,"
+                    f"dur={risk_window['duration_points']}pts,"
+                    f"prom_max={risk_window['prominence_max_c']:.2f}C]"
                 )
 
             risky = c_night_peak
             if risky:
                 risk_count += 1
-                if night_peak_dt is not None:
-                    if latest_risky_peak is None or night_peak_dt > latest_risky_peak:
-                        latest_risky_peak = night_peak_dt
+                # 解锁锚点使用“风险窗口结束时间”，避免 plateau/多峰时用到过早的峰值导致提前解锁。
+                anchor = night_peak_anchor_dt or night_peak_dt
+                if anchor is not None:
+                    if latest_risky_peak is None or anchor > latest_risky_peak:
+                        latest_risky_peak = anchor
 
             # 4. 提取汇总指标用于返回
             future = [(dt, t) for dt, t in corrected if dt >= now_utc and self._local_hour(dt, tz_offset) < 24]
@@ -262,11 +267,18 @@ class ForecastGuardManager:
                     else (round(night_peaks[0]["temp"], 3) if night_peaks else None)
                 ),
                 "night_peak_time_utc": night_peak_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if night_peak_dt else None,
-                "night_peak_duration_pts": (
-                    int(valid_night_peak["duration_points"]) if valid_night_peak is not None else 0
+                "night_peak_anchor_time_utc": (
+                    night_peak_anchor_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if night_peak_anchor_dt else None
                 ),
+                "night_peak_duration_pts": int(risk_window["duration_points"]) if risk_window is not None else 0,
                 "night_peak_prominence_c": (
-                    round(valid_night_peak["prominence_c"], 3) if valid_night_peak is not None else None
+                    round(risk_window["prominence_max_c"], 3) if risk_window is not None else None
+                ),
+                "night_risk_window_start_utc": (
+                    risk_window["start_time"].strftime("%Y-%m-%dT%H:%M:%SZ") if risk_window is not None else None
+                ),
+                "night_risk_window_end_utc": (
+                    risk_window["end_time"].strftime("%Y-%m-%dT%H:%M:%SZ") if risk_window is not None else None
                 ),
                 "c_night_peak": c_night_peak,
                 "risky": risky,
@@ -386,7 +398,114 @@ class ForecastGuardManager:
         best = min(points, key=lambda x: abs((x[0] - ref_dt).total_seconds()))
         return best[1]
 
-    def _find_valid_night_risk_peak(
+    def _find_valid_night_risk_window(
+        self,
+        series: List[Tuple[datetime, float]],
+        tz_offset: float,
+        day_ref_max: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Find a night risk *window* with persistence + prominence filters.
+
+        This replaces the old "first local peak" rule to avoid plateau/multi-peak cases
+        anchoring too early (e.g. reporting 17:00 while the max persists to 22:00).
+        """
+        rebound_threshold = float(self.config.FORECAST_GUARD_PEAK_THRESHOLD_C)
+        min_points = max(1, int(self.config.FORECAST_GUARD_PEAK_MIN_POINTS))
+        min_prominence = max(0.0, float(self.config.FORECAST_GUARD_PEAK_PROMINENCE_C))
+        risk_line = day_ref_max - rebound_threshold
+
+        # Keep only 12:00-24:00 local points for the local day (caller already filtered date).
+        day_points: List[Tuple[datetime, float, float]] = []
+        for dt_utc, temp in series:
+            local_hour = self._local_hour(dt_utc, tz_offset)
+            if 12 <= local_hour < 24:
+                day_points.append((dt_utc, temp, local_hour))
+
+        if len(day_points) < 3:
+            return None
+
+        # Build contiguous night segments where temp >= risk_line.
+        segments: List[Tuple[int, int]] = []
+        start = None
+        for i, (_, temp, hour) in enumerate(day_points):
+            in_night = hour >= 17
+            ok = in_night and (temp >= risk_line)
+            if ok and start is None:
+                start = i
+            if (not ok) and start is not None:
+                segments.append((start, i - 1))
+                start = None
+        if start is not None:
+            segments.append((start, len(day_points) - 1))
+
+        def local_peak_prom(i: int) -> Optional[float]:
+            if i <= 0 or i >= len(day_points) - 1:
+                return None
+            curr = day_points[i][1]
+            prev = day_points[i - 1][1]
+            nxt = day_points[i + 1][1]
+            if not (curr > prev and curr >= nxt):
+                return None
+            return curr - max(prev, nxt)
+
+        best: Optional[Dict[str, Any]] = None
+        eps = 1e-9
+        for left, right in segments:
+            duration = right - left + 1
+            if duration < min_points:
+                continue
+
+            temps = [day_points[j][1] for j in range(left, right + 1)]
+            max_temp = max(temps)
+            max_indices = [j for j in range(left, right + 1) if abs(day_points[j][1] - max_temp) <= 1e-6]
+            max_idx = max(max_indices)  # latest max -> better representative time
+
+            # Prominence within window: require at least one local peak inside the window.
+            # This preserves the legacy intent: avoid flagging a purely monotonic cooling tail
+            # after 17:00 as "risk" just because it is still above the risk line.
+            prom_peaks = []
+            for j in range(left, right + 1):
+                p = local_peak_prom(j)
+                if p is not None:
+                    prom_peaks.append(p)
+            if not prom_peaks:
+                continue
+            prom_max = max(prom_peaks)
+
+            if prom_max + eps < min_prominence:
+                continue
+
+            start_dt, _, start_hour = day_points[left]
+            end_dt, _, end_hour = day_points[right]
+            max_dt, _, max_hour = day_points[max_idx]
+
+            candidate = {
+                "start_time": start_dt,
+                "end_time": end_dt,
+                "start_local_hour": start_hour,
+                "end_local_hour": end_hour,
+                "max_time": max_dt,
+                "max_local_hour": max_hour,
+                "max_temp": max_temp,
+                "duration_points": duration,
+                "prominence_max_c": prom_max,
+                "risk_line_c": risk_line,
+            }
+
+            if best is None:
+                best = candidate
+                continue
+
+            # Choose the strongest (higher max), then more conservative (later end).
+            if (candidate["max_temp"] > best["max_temp"] + 1e-6) or (
+                abs(candidate["max_temp"] - best["max_temp"]) <= 1e-6
+                and candidate["end_time"] > best["end_time"]
+            ):
+                best = candidate
+
+        return best
+
+    def _find_valid_night_risk_peak_legacy(
         self,
         series: List[Tuple[datetime, float]],
         tz_offset: float,

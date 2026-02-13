@@ -15,12 +15,12 @@
 ### 2.2 风控层 (Forecast Guard V2)
 - 周期：从本地 12:00 开始，默认每 1800 秒（30 分钟）重算。
 - 偏差修正：按源计算 `bias = NOAA当前实测 - 该源当前预报`，用校正后温度参与风险判断。
-- 风险锁：
-  - `NightPeak >= AfternoonPeak - 1.5°C`
-  - `NightPeak >= DayMaxSoFar - 0.5°C`
-  - `未来3小时回暖 >= 0.8°C`
-- 触发规则：任一源命中即锁定，锁定后禁止 `BUY_DROP` 与 `BUY_FORCE`。
+- 风险锁：识别 17:00 后“夜间风险峰值”（接近日间参考高点 + 局部峰值 + 持续点数 + 显著性）。
+- 触发规则：
+  - `Risky forecast sources >= FORECAST_GUARD_RISK_SOURCE_THRESHOLD`（系统内最低按 2 源生效）即锁定。
+  - 或 `available_sources == 0` 且 `FORECAST_GUARD_FAIL_SAFE=true` 时锁定。
 - 解锁规则：峰值时间过去 + 多源实测确认降温 + 未来2小时不再明显回暖。
+- 细节文档：`docs/STRATEGY_V5_NIGHT_GUARDIAN.md`（完整锁仓原因、告警去抖与参数说明）。
 
 ### 2.3 策略判定层 (Strategy Kernel)
 - 三阶段下跌触发（Phase1/2/3）。
@@ -55,6 +55,7 @@ scripts/fetch_12h_forecasts.py
 ## 4. 运行时配置（核心）
 - 策略触发：`STRATEGY_P1_* / P2_* / P3_* / STRATEGY_FORCE_BUY_TIME`
 - 风控开关：`FORECAST_GUARD_ENABLED`, `FORECAST_GUARD_FAIL_SAFE`
+- 风控告警去抖：`FORECAST_GUARD_NOAA_ANCHOR_ALERT_STREAK`（仅影响 `No NOAA anchor` 告警，默认 2 次）
 - 风控阈值：`FORECAST_GUARD_NEAR_DELTA_C`, `FORECAST_GUARD_NEW_HIGH_DELTA_C`, `FORECAST_GUARD_REBOUND_DELTA_3H_C`
 - 风控解锁：`FORECAST_GUARD_PEAK_PASSED_MINUTES`, `FORECAST_GUARD_UNLOCK_*`
 - Met Office site-specific：`METOFFICE_SITE_SPECIFIC_*`
@@ -64,4 +65,4 @@ scripts/fetch_12h_forecasts.py
 - 待扩展：风向/云量过滤、基于仓位的动态对冲与退出策略。
 
 ---
-*最后更新：2026-02-11 | 文档版本：v1.3*
+*最后更新：2026-02-12 | 文档版本：v1.4*

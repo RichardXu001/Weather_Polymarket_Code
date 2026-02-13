@@ -32,6 +32,12 @@ class WeatherPriceMonitor:
         self.last_mn_data = (None, None)
         self.last_om_fetch_time = 0
         self.last_mn_fetch_time = 0
+
+        # 网络鲁棒性：短重试 + 线性退避（仅处理瞬时网络抖动）
+        self.transient_retries = max(0, int(os.getenv("HTTP_TRANSIENT_RETRIES", 1)))
+        self.retry_backoff_seconds = max(0.0, float(os.getenv("HTTP_RETRY_BACKOFF_SECONDS", 0.8)))
+        self.timeout_weather_seconds = float(os.getenv("HTTP_TIMEOUT_WEATHER_SECONDS", 10))
+        self.timeout_poly_seconds = float(os.getenv("HTTP_TIMEOUT_POLY_SECONDS", 15))
         
         # 创建持久化会话与 User-Agent
         self.session = requests.Session()
@@ -54,10 +60,42 @@ class WeatherPriceMonitor:
         self.csv_file = f"{data_dir}/weather_recording_{self.city_name}_{start_time_str}.csv"
         self.columns = []
 
+    def _get_with_retry(self, url, timeout, source_name):
+        """对瞬时网络错误做短重试；429 交给上层逻辑处理。"""
+        attempts = self.transient_retries + 1
+        transient_status = {500, 502, 503, 504, 520, 521, 522, 523, 524}
+
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = self.session.get(url, timeout=timeout)
+                if resp.status_code in transient_status and attempt < attempts:
+                    delay = self.retry_backoff_seconds * attempt
+                    print(
+                        f"⚠️ [{source_name}] Transient HTTP {resp.status_code} for {self.city_name}, "
+                        f"retrying in {delay:.1f}s ({attempt}/{attempts - 1})"
+                    )
+                    time.sleep(delay)
+                    continue
+                return resp
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.SSLError,
+            ) as e:
+                if attempt < attempts:
+                    delay = self.retry_backoff_seconds * attempt
+                    print(
+                        f"⚠️ [{source_name}] Transient {e.__class__.__name__} for {self.city_name}, "
+                        f"retrying in {delay:.1f}s ({attempt}/{attempts - 1})"
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+
     def fetch_noaa(self):
         """Source 1: NOAA/METAR (Real-time Observation ONLY)"""
         try:
-            r = self.session.get(self.metar_url, timeout=10)
+            r = self._get_with_retry(self.metar_url, timeout=self.timeout_weather_seconds, source_name="NOAA")
             if r.status_code == 200:
                 data = r.json()
                 if data:
@@ -80,7 +118,11 @@ class WeatherPriceMonitor:
             return self.last_om_data
 
         try:
-            r = self.session.get(self.open_meteo_url, timeout=10)
+            r = self._get_with_retry(
+                self.open_meteo_url,
+                timeout=self.timeout_weather_seconds,
+                source_name="Open-Meteo",
+            )
             if r.status_code == 200:
                 data = r.json()
                 curr = data.get('current_weather', {}).get('temperature')
@@ -109,7 +151,7 @@ class WeatherPriceMonitor:
             return self.last_mn_data
 
         try:
-            r = self.session.get(self.met_no_url, timeout=10)
+            r = self._get_with_retry(self.met_no_url, timeout=self.timeout_weather_seconds, source_name="Met.no")
             if r.status_code == 200:
                 data = r.json()
                 timeseries = data.get('properties', {}).get('timeseries', [])
@@ -132,7 +174,7 @@ class WeatherPriceMonitor:
     def fetch_polymarket_asks(self):
         results = {}
         try:
-            r = self.session.get(self.poly_url, timeout=15)
+            r = self._get_with_retry(self.poly_url, timeout=self.timeout_poly_seconds, source_name="Polymarket")
             if r.status_code == 200:
                 data = r.json()
                 if data:

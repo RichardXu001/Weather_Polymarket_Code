@@ -231,6 +231,8 @@ class WeatherBot:
         # FG 锁仓状态机：仅在锁仓状态切换时发通知，避免循环内重复推送
         prev_fg_locked = False
         prev_fg_reason = ""
+        noaa_anchor_lock_streak = 0
+        noaa_anchor_alert_sent = False
         
         while True:
             try:
@@ -333,7 +335,24 @@ class WeatherBot:
 
                 fg_locked_now = bool(guard_state.get("locked"))
                 fg_reason_now = guard_state.get("reason", "")
-                if fg_locked_now and (not prev_fg_locked or fg_reason_now != prev_fg_reason):
+                notify_fg_lock = False
+                if fg_locked_now:
+                    if fg_reason_now == "No NOAA anchor":
+                        noaa_anchor_lock_streak += 1
+                        needed_streak = max(1, int(self.config.FORECAST_GUARD_NOAA_ANCHOR_ALERT_STREAK))
+                        if noaa_anchor_lock_streak >= needed_streak and not noaa_anchor_alert_sent:
+                            notify_fg_lock = True
+                            noaa_anchor_alert_sent = True
+                    else:
+                        noaa_anchor_lock_streak = 0
+                        noaa_anchor_alert_sent = False
+                        if (not prev_fg_locked) or (fg_reason_now != prev_fg_reason):
+                            notify_fg_lock = True
+                else:
+                    noaa_anchor_lock_streak = 0
+                    noaa_anchor_alert_sent = False
+
+                if notify_fg_lock:
                     src_reports = guard_state.get("sources", {}) if isinstance(guard_state.get("sources"), dict) else {}
                     risky_sources = sorted(
                         [

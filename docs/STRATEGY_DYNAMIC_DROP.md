@@ -65,15 +65,11 @@
   `校正预报 = 原预报 + bias`
 
 3. **风险判定（按源独立判断）**:
-- `AfternoonPeak`: 13:00-17:00 校正后预报峰值  
-- `NightPeak`: 17:00-24:00 校正后预报峰值  
-- 命中任一条件即该源判为 risky:
-  - `NightPeak >= AfternoonPeak - 1.5°C`
-  - `NightPeak >= DayMaxSoFar - 0.5°C`
-  - `未来3小时最高温 - 当前温度 >= 0.8°C`
+- 在 17:00 后识别“夜间风险峰值”（接近日间参考高点 + 局部峰值形态 + 持续点数 + 显著性）。
+- 单源命中后记为 `risky`，并写入 `risk_desc`。
 
 4. **风险锁动作**:
-- 只要 `>=1` 个源判 risky，立即进入锁定状态：
+- 当 `risky` 源数量达到阈值时（`FORECAST_GUARD_RISK_SOURCE_THRESHOLD`，系统内最低按 2 源生效），进入锁定状态：
   - 禁止 `BUY_DROP`
   - 禁止 `BUY_FORCE`
 
@@ -86,7 +82,11 @@
   - 至少 2 个预报源满足“未来 2 小时最大升温 `<=0.2°C`”
 
 6. **故障兜底**:
-- 若 Forecast Guard 关键预报源全不可用，默认 fail-safe（锁定不买）。
+- 若 NOAA 锚点缺失，或关键预报源全不可用，且 `FORECAST_GUARD_FAIL_SAFE=true`，则锁定不买。
+- `No NOAA anchor` 告警支持去抖：`FORECAST_GUARD_NOAA_ANCHOR_ALERT_STREAK`（默认 2）。
+
+7. **完整锁仓原因与告警规则**:
+- 详见：`docs/STRATEGY_V5_NIGHT_GUARDIAN.md`
 
 ## 7. 全球数据源汇总（当前可用）
 
@@ -177,9 +177,10 @@ FORECAST_GUARD_ENABLED=true
 FORECAST_GUARD_FAIL_SAFE=true
 FORECAST_GUARD_RECALC_INTERVAL_SECONDS=1800
 FORECAST_GUARD_RISK_SOURCE_THRESHOLD=2
-FORECAST_GUARD_NEAR_DELTA_C=1.5
-FORECAST_GUARD_NEW_HIGH_DELTA_C=0.5
-FORECAST_GUARD_REBOUND_DELTA_3H_C=0.8
+FORECAST_GUARD_NOAA_ANCHOR_ALERT_STREAK=2
+FORECAST_GUARD_PEAK_THRESHOLD_C=1.5
+FORECAST_GUARD_PEAK_MIN_POINTS=2
+FORECAST_GUARD_PEAK_PROMINENCE_C=0.3
 FORECAST_GUARD_PEAK_PASSED_MINUTES=30
 FORECAST_GUARD_UNLOCK_NOAA_DROP_C=0.3
 FORECAST_GUARD_UNLOCK_AUX_DROP_C=0.2
@@ -187,4 +188,4 @@ FORECAST_GUARD_UNLOCK_FUTURE_WARMING_C=0.2
 ```
 
 ---
-*最后更新：2026-02-11 | 策略标准：V4.2.2+FGV2*
+*最后更新：2026-02-12 | 策略标准：V4.2.2+FGV2*

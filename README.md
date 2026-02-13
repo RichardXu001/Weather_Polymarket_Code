@@ -35,13 +35,14 @@
 ### 2.2 Forecast Guard V2（FGV2）
 - 从本地 12:00 开始，每 30 分钟重算风险
 - 预报先做 bias 校正：`bias = NOAA当前 - 预报当前`
-- 风险命中即锁仓（禁止 `BUY_DROP`/`BUY_FORCE`）：
-  - `NightPeak >= AfternoonPeak - 1.5C`
-  - `NightPeak >= DayMaxSoFar - 0.5C`
-  - `未来3小时升温 >= 0.8C`
+- 风险源判定：识别“夜间风险峰值”（17:00后接近日间参考高点、满足持续点数与显著性）
+- 锁仓触发（禁止 `BUY_DROP`/`BUY_FORCE`）：
+  - `Risky forecast sources >= FORECAST_GUARD_RISK_SOURCE_THRESHOLD`（系统内最低按 2 源生效）
+  - 或 `available_sources == 0` 且 `FORECAST_GUARD_FAIL_SAFE=true`
 - 解锁要求：峰值过去 + 多源实测连续降温 + 未来2小时不再明显回暖
 
 详细说明见：
+- `docs/STRATEGY_V5_NIGHT_GUARDIAN.md`（锁仓原因、解锁与告警去抖细则）
 - `docs/STRATEGY_DYNAMIC_DROP.md`
 - `docs/ARCHITECTURE_GUIDE.md`
 
@@ -74,6 +75,7 @@ FORECAST_GUARD_ENABLED=true
 FORECAST_GUARD_FAIL_SAFE=true
 FORECAST_GUARD_RECALC_INTERVAL_SECONDS=1800
 FORECAST_GUARD_RISK_SOURCE_THRESHOLD=2
+FORECAST_GUARD_NOAA_ANCHOR_ALERT_STREAK=2
 FORECAST_GUARD_NEAR_DELTA_C=1.5
 FORECAST_GUARD_NEW_HIGH_DELTA_C=0.5
 FORECAST_GUARD_REBOUND_DELTA_3H_C=0.8
