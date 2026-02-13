@@ -492,21 +492,34 @@ class WeatherBot:
                             reason=reason
                         )
                         
-                        # 只有在非 Dry Run 且拿到价格时才下单
-                        if not self.config.DRY_RUN and contract_price:
-                            # 转换信号为标准 BUY 进行执行
-                            await self.executor.execute_trade('BUY', monitor.event_slug, contract_price, self.config.TRADE_SHARES)
+                        # 下单执行（dry run/real 统一走 executor；real 需要 token_id）
+                        order_result = None
+                        if contract_price:
+                            token_id = None
+                            if isinstance(p_data, dict):
+                                token_id = p_data.get("yes_token_id")
+                            if not self.config.DRY_RUN and not token_id:
+                                logger.error(f"[{preset_name:8}] Missing yes_token_id for contract: {target_contract} (cannot place real order)")
+                            else:
+                                # 转换信号为标准 BUY 进行执行
+                                order_result = await self.executor.execute_trade(
+                                    "BUY",
+                                    token_id or f"dry_token_{preset_name}",
+                                    float(contract_price),
+                                    float(self.config.TRADE_SHARES),
+                                    neg_risk=bool(p_data.get("neg_risk")) if isinstance(p_data, dict) else False,
+                                )
                         
                         # 标记今日已交易
                         state.has_traded_today = True
                         logger.info(f"[{preset_name:8}] ⚡ Trade Triggered ({signal}). Daily trade locked.")
 
                         # 记录交易事件并开始追踪生命周期
-                        order_id = f"dry_{int(datetime.now().timestamp())}"
-                        if not self.config.DRY_RUN:
-                            # 实际下单时应从执行器获取真实 OrderID
-                            # 这里假设执行器返回结果中包含 order_id
-                            pass 
+                        order_id = None
+                        if order_result and isinstance(order_result, dict):
+                            order_id = order_result.get("order_id")
+                        if not order_id:
+                            order_id = f"dry_{int(datetime.now().timestamp())}"
 
                         self.pos_manager.record_pending_order(
                             city_name=conf.get("city_name", preset_name),
@@ -518,7 +531,11 @@ class WeatherBot:
                             shares=self.config.TRADE_SHARES,
                             reason=reason,
                             order_id=order_id,
-                            is_dry_run=self.config.DRY_RUN
+                            is_dry_run=self.config.DRY_RUN,
+                            yes_token_id=(p_data.get("yes_token_id") if isinstance(p_data, dict) else "") or "",
+                            condition_id=(p_data.get("condition_id") if isinstance(p_data, dict) else "") or "",
+                            outcome_index=str((p_data.get("yes_outcome_index") if isinstance(p_data, dict) else "") or ""),
+                            neg_risk=str((p_data.get("neg_risk") if isinstance(p_data, dict) else "") or ""),
                         )
                 
                 self._record_data(current_recording_file, state, prices, signal, reason, guard_state)
@@ -951,48 +968,85 @@ class WeatherBot:
         await asyncio.gather(*tasks)
 
     async def monitor_and_report_loop(self, presets, report_interval_hours=4):
-        """每隔 4 小时更新一次状态并发送钉钉汇总报告 (启动时立即推送一次)"""
-        logger.info(f"[*] Postion Monitor Loop Started (Interval: {report_interval_hours}h)")
-        
+        """
+        持仓对账与汇总推送：
+        - 状态校验可以更频繁（默认 15min 一次）
+        - 汇总推送仍按 4h 一次（或用户传入的 report_interval_hours）
+        """
+        poll_seconds = int(os.getenv("POSITION_STATUS_POLL_SECONDS", "900"))  # 15min
+        logger.info(f"[*] Postion Monitor Loop Started (Poll: {poll_seconds}s, Report: {report_interval_hours}h)")
+
+        last_report_ts = 0.0
+        last_redeem_ts = 0.0
+        redeem_enabled = os.getenv("AUTO_REDEEM_ENABLED", "false").lower() == "true"
+        redeem_interval_s = int(os.getenv("AUTO_REDEEM_INTERVAL_SECONDS", str(int(report_interval_hours * 3600))))
         while True:
             try:
-                # 1. 更新所有地点的持仓状态
-                logger.info("[监控] 正在更新所有地点的持仓状态并准备报告...")
+                # 1) 更高频对账：PENDING->FILLED / FILLED->WIN/LOSS
+                logger.info("[监控] 正在更新所有地点的持仓状态...")
                 for p in presets:
-                    self.pos_manager.update_positions_status(p)
-                
-                # 2. 生成汇总报告并发送
-                report_text = self.pos_manager.get_summary_report()
-                
-                webhook = os.getenv("DINGTALK_WEBHOOK")
-                if webhook:
-                    payload = {
-                        "msgtype": "text",
-                        "text": {
-                            "content": f"[Beijixing-WeatherBot] 📊 定期持仓汇总报告\n\n当前持仓状态\n{report_text}\n\n-- [Robot: Weather Bot]"
-                        }
-                    }
-                    import json
-                    logger.info(f"[监控推送] Payload: {json.dumps(payload, ensure_ascii=False)}")
-                    # 使用 run_in_executor 避免同步请求阻塞异步循环
-                    def _send():
-                        try:
-                            # 增加对响应的深度校验
-                            r = requests.post(webhook, json=payload, timeout=15)
-                            logger.info(f"[监控] 钉钉响应: {r.status_code} - {r.text}")
-                        except Exception as e:
-                            logger.error(f"[监控] 发送请求异常: {e}")
+                    if self.config.DRY_RUN:
+                        self.pos_manager.update_positions_status(p)
+                    else:
+                        # Use sync CLOB polling to avoid event-loop reentrancy issues.
+                        self.pos_manager.update_positions_status(
+                            p,
+                            order_fetcher=lambda oid, req: self.executor.get_order_summary_sync(oid, requested_size=req),
+                        )
+
+                # 1.5) 可选：自动赎回（耗时，放到线程里跑，并降低频率）
+                now = time.time()
+                if redeem_enabled and (last_redeem_ts == 0.0 or (now - last_redeem_ts) >= redeem_interval_s):
+                    logger.info("[Redeem] Auto redeem triggered...")
+
+                    def _redeem():
+                        # Lazy import so the main bot path doesn't depend on data-api helpers.
+                        from src.monitor.redeem_worker import redeem_positions_from_data_api
+                        return redeem_positions_from_data_api()
 
                     loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(None, _send)
-                else:
-                    logger.warning("[监控] 钉钉 Webhook 未配置，无法发送汇总报告")
+                    redeemed = await loop.run_in_executor(None, _redeem)
+                    if redeemed:
+                        marked = 0
+                        for r in redeemed:
+                            marked += self.pos_manager.mark_redeemed_by_condition(r.get("condition_id"), r.get("outcome_index"))
+                        logger.info(f"[Redeem] Redeemed={len(redeemed)}; trade_history marked={marked}")
+                    last_redeem_ts = now
+
+                # 2) 按 4h (或配置) 推送一次汇总
+                now = time.time()
+                if last_report_ts == 0.0 or (now - last_report_ts) >= report_interval_hours * 3600:
+                    report_text = self.pos_manager.get_summary_report()
+
+                    webhook = os.getenv("DINGTALK_WEBHOOK")
+                    if webhook:
+                        payload = {
+                            "msgtype": "text",
+                            "text": {
+                                "content": f"[Beijixing-WeatherBot] 📊 定期持仓汇总报告\n\n当前持仓状态\n{report_text}\n\n-- [Robot: Weather Bot]"
+                            }
+                        }
+                        import json
+                        logger.info(f"[监控推送] Payload: {json.dumps(payload, ensure_ascii=False)}")
+
+                        def _send():
+                            try:
+                                r = requests.post(webhook, json=payload, timeout=15)
+                                logger.info(f"[监控] 钉钉响应: {r.status_code} - {r.text}")
+                            except Exception as e:
+                                logger.error(f"[监控] 发送请求异常: {e}")
+
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, _send)
+                    else:
+                        logger.warning("[监控] 钉钉 Webhook 未配置，无法发送汇总报告")
+
+                    last_report_ts = now
 
             except Exception as e:
-                logger.error(f"[监控] 报告循环异常: {e}")
-            
-            # 最后等待间隔时间
-            await asyncio.sleep(report_interval_hours * 3600)
+                logger.error(f"[监控] 监控循环异常: {e}")
+
+            await asyncio.sleep(poll_seconds)
 
 
 if __name__ == "__main__":

@@ -184,6 +184,50 @@ class WeatherPriceMonitor:
                         title = m.get('groupItemTitle', m.get('question'))
                         yes_ask = m.get('bestAsk')
                         yes_bid = m.get('bestBid')
+
+                        # Token ids (Gamma sometimes returns list, sometimes JSON-encoded string)
+                        token_ids = m.get('clobTokenIds', [])
+                        if isinstance(token_ids, str):
+                            try:
+                                import json as _json
+                                token_ids = _json.loads(token_ids)
+                            except Exception:
+                                token_ids = []
+                        outcomes = m.get("outcomes", [])
+                        if isinstance(outcomes, str):
+                            try:
+                                import json as _json
+                                outcomes = _json.loads(outcomes)
+                            except Exception:
+                                outcomes = []
+                        yes_outcome_index = None
+                        no_outcome_index = None
+                        yes_token_id = None
+                        no_token_id = None
+                        if isinstance(token_ids, list) and len(token_ids) >= 2 and isinstance(outcomes, list) and len(outcomes) >= 2:
+                            idx_yes = None
+                            idx_no = None
+                            for i, o in enumerate(outcomes):
+                                o_norm = str(o).strip().lower()
+                                if o_norm == "yes":
+                                    idx_yes = i
+                                elif o_norm == "no":
+                                    idx_no = i
+                            if idx_yes is not None and idx_no is not None and idx_yes < len(token_ids) and idx_no < len(token_ids):
+                                yes_token_id = token_ids[idx_yes]
+                                no_token_id = token_ids[idx_no]
+                                yes_outcome_index = idx_yes
+                                no_outcome_index = idx_no
+                            else:
+                                yes_token_id = token_ids[0]
+                                no_token_id = token_ids[1]
+                                yes_outcome_index = 0
+                                no_outcome_index = 1
+                        elif isinstance(token_ids, list) and len(token_ids) >= 2:
+                            yes_token_id = token_ids[0]
+                            no_token_id = token_ids[1]
+                            yes_outcome_index = 0
+                            no_outcome_index = 1
                         
                         # No 的报价推导：No Ask = 1 - Yes Bid, No Bid = 1 - Yes Ask
                         no_ask = (1 - float(yes_bid)) if yes_bid else None
@@ -194,7 +238,13 @@ class WeatherPriceMonitor:
                             'yes_bid': yes_bid,
                             'no_ask': no_ask,
                             'no_bid': no_bid,
-                            'vol': m.get('volumeClob')
+                            'vol': m.get('volumeClob'),
+                            'yes_token_id': yes_token_id,
+                            'no_token_id': no_token_id,
+                            'condition_id': m.get('conditionId'),
+                            'neg_risk': m.get('negRisk', False),
+                            'yes_outcome_index': yes_outcome_index,
+                            'no_outcome_index': no_outcome_index,
                         }
             elif r.status_code == 429:
                 print(f"⚠️ [Polymarket] Rate limit triggered (429) for {self.city_name}")

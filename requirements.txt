@@ -3,3 +3,5 @@ python-dotenv
 httpx
 numpy
 web3
+py_clob_client==0.34.5
+py_order_utils==0.3.2

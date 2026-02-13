@@ -1,5 +1,6 @@
 # 敏感配置
 .env
+.env.bak.*
 
 # Python
 venv/

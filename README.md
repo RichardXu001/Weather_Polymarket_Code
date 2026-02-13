@@ -69,6 +69,28 @@ ENABLE_SEOUL=true
 ENABLE_ANKARA=true
 ```
 
+### 4.1.1 实盘下单与持仓对账（CLOB）
+> Dry-run 不需要配置；实盘需要。
+```env
+POLYMARKET_PRIVATE_KEY=
+POLYMARKET_FUNDER=                # 可选：Gnosis Safe / 代理地址
+POLYMARKET_SIGNATURE_TYPE=2
+POLYMARKET_API_KEY=               # 可选：如果不填则从私钥派生
+POLYMARKET_API_SECRET=
+POLYMARKET_API_PASSPHRASE=
+CLOB_HOST=https://clob.polymarket.com
+ORDER_TYPE=GTC                    # GTC/FOK 等（取决于 CLOB 支持）
+CLOB_PRICE_CAP=0.99
+```
+
+### 4.1.2 状态检查与赎回
+```env
+POSITION_STATUS_POLL_SECONDS=900  # 15min：更快刷新 PENDING/FILLED/WIN/LOSS
+AUTO_REDEEM_ENABLED=false         # true 则自动赎回已结算且胜出的仓位
+AUTO_REDEEM_INTERVAL_SECONDS=14400  # 4h：赎回很耗时，不建议太频繁
+POLYGON_RPC_URL=                  # 可选：自定义 RPC（赎回用）
+```
+
 ### 4.2 Forecast Guard V2
 ```env
 FORECAST_GUARD_ENABLED=true
