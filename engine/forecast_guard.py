@@ -33,10 +33,6 @@ class ForecastGuardManager:
         }
         if not self.config.FORECAST_GUARD_ENABLED:
             return result
-        if state.noaa_curr is None:
-            result["locked"] = bool(self.config.FORECAST_GUARD_FAIL_SAFE)
-            result["reason"] = "No NOAA anchor"
-            return result
 
         now_utc = datetime.now(timezone.utc)
         entry = self._cache.setdefault(
@@ -47,8 +43,26 @@ class ForecastGuardManager:
                 "locked": False,
                 "lock_reason": "",
                 "lock_peak_utc": None,
+                "noaa_anchor_miss_streak": 0,
             },
         )
+
+        # NOAA anchor fail-safe with streak: do not lock on one-off network jitter.
+        if state.noaa_curr is None:
+            entry["noaa_anchor_miss_streak"] = int(entry.get("noaa_anchor_miss_streak", 0)) + 1
+            lock_streak = max(1, int(getattr(self.config, "FORECAST_GUARD_NOAA_ANCHOR_LOCK_STREAK", 3)))
+            should_lock = (
+                bool(self.config.FORECAST_GUARD_FAIL_SAFE)
+                and entry["noaa_anchor_miss_streak"] >= lock_streak
+            )
+            result["locked"] = should_lock
+            result["reason"] = "No NOAA anchor"
+            # Expose streak for debugging/recording.
+            result["noaa_anchor_miss_streak"] = entry["noaa_anchor_miss_streak"]
+            result["noaa_anchor_lock_streak"] = lock_streak
+            return result
+        else:
+            entry["noaa_anchor_miss_streak"] = 0
 
         need_refresh = True
         if entry["last_refresh_utc"] is not None:

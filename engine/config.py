@@ -109,6 +109,11 @@ class QuantConfig:
     FORECAST_GUARD_FAIL_SAFE = os.getenv("FORECAST_GUARD_FAIL_SAFE", "true").lower() == "true"
     FORECAST_GUARD_RECALC_INTERVAL_SECONDS = int(os.getenv("FORECAST_GUARD_RECALC_INTERVAL_SECONDS", 1800))
     FORECAST_GUARD_RISK_SOURCE_THRESHOLD = int(os.getenv("FORECAST_GUARD_RISK_SOURCE_THRESHOLD", 2))
+    # 连续 N 次 NOAA 缺失才触发 fail-safe 锁仓，避免一次性网络抖动导致立刻锁仓。
+    # 默认 3 次；若 NOAA 采样间隔为 30s，相当于 ~90s 连续缺失才会锁。
+    FORECAST_GUARD_NOAA_ANCHOR_LOCK_STREAK = int(
+        os.getenv("FORECAST_GUARD_NOAA_ANCHOR_LOCK_STREAK", 3)
+    )
     FORECAST_GUARD_NOAA_ANCHOR_ALERT_STREAK = int(
         os.getenv("FORECAST_GUARD_NOAA_ANCHOR_ALERT_STREAK", 2)
     )

@@ -26,7 +26,7 @@ FG 的 `Reason` 目前主要来自以下几类：
 1. `Risky forecast sources N [...]`  
    - 说明：多源夜间回暖风险达到阈值，进入风险锁。
 2. `No NOAA anchor`  
-   - 说明：NOAA 实测锚点缺失（常见于 NOAA 超时/SSL 抖动），在 `FORECAST_GUARD_FAIL_SAFE=true` 下直接锁。
+   - 说明：NOAA 实测锚点缺失（常见于 NOAA 超时/SSL 抖动），在 `FORECAST_GUARD_FAIL_SAFE=true` 下需连续缺失 N 次才触发锁（避免一次性抖动立刻锁仓）。
 3. `No forecast sources available`  
    - 说明：预报源全部不可用，在 fail-safe 下直接锁。
 4. `Guard fetch failed: ...`  
@@ -68,6 +68,7 @@ FORECAST_GUARD_ENABLED=true
 FORECAST_GUARD_FAIL_SAFE=true
 FORECAST_GUARD_RECALC_INTERVAL_SECONDS=1800
 FORECAST_GUARD_RISK_SOURCE_THRESHOLD=2
+FORECAST_GUARD_NOAA_ANCHOR_LOCK_STREAK=3
 FORECAST_GUARD_NOAA_ANCHOR_ALERT_STREAK=2
 FORECAST_GUARD_PEAK_THRESHOLD_C=1.5
 FORECAST_GUARD_PEAK_MIN_POINTS=2
